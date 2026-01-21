@@ -176,22 +176,36 @@ if pdf_files:
 
     df = pd.DataFrame(rows)
 
-    # ✅ Excel: evitar notación científica (forzar texto de forma compatible)
-    # Excel al abrir CSV "adivina" tipos; anteponemos ' para asegurar texto.
+    # ✅ Excel: forzar CAE como texto para evitar notación científica al abrir CSV
     df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
 
-    # ✅ Limpiar saltos de línea para que no aparezca \n en Excel
+    # ✅ Limpiar saltos de línea
     df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
     st.subheader("Resultados")
     st.dataframe(df, use_container_width=True)
 
-    # ✅ Excel AR: separador ; + UTF-8 con BOM (bytes) para acentos correctos en Excel
-    csv_data = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+    # ✅ CSV compatible Excel AR: separador ; + UTF-8 con BOM (en bytes)
+    csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
-    st.download_button(
-        "Descargar CSV (Excel)",
-        data=csv_data,
-        file_name="resultado_verificacion_cae_demo.csv",
-        mime="text/csv",
-    )
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.download_button(
+            "Descargar CSV (Excel)",
+            data=csv_bytes,
+            file_name="resultado_verificacion_cae_demo.csv",
+            mime="text/csv",
+        )
+
+    # ✅ Excel real (.xlsx): evita cualquier problema de separadores/encoding
+    with col2:
+        xlsx_buffer = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Resultados")
+        st.download_button(
+            "Descargar Excel (.xlsx)",
+            data=xlsx_buffer.getvalue(),
+            file_name="resultado_verificacion_cae_demo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
