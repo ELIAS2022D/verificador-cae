@@ -1,4 +1,5 @@
 import io
+import zipfile
 import re
 from datetime import datetime
 import pandas as pd
@@ -69,20 +70,67 @@ st.info(
     "La verificación 'real' contra AFIP (existencia/correspondencia) se integra en la siguiente fase."
 )
 
-uploaded = st.file_uploader("Subí hasta 20 facturas en PDF", type=["pdf"], accept_multiple_files=True)
+st.subheader("Carga de archivos")
+mode = st.radio("Modo de carga", ["PDFs (hasta 20)", "ZIP (contiene PDFs)"], horizontal=True)
 
-if uploaded:
-    if len(uploaded) > 20:
-        st.warning("Subiste más de 20. Para la demo, procesaré solo las primeras 20.")
-        uploaded = uploaded[:20]
+pdf_files = []  # lista de dicts: {"name": str, "bytes": bytes}
 
+if mode == "PDFs (hasta 20)":
+    uploaded = st.file_uploader("Subí hasta 20 facturas en PDF", type=["pdf"], accept_multiple_files=True)
+
+    if uploaded:
+        if len(uploaded) > 20:
+            st.warning("Subiste más de 20. Para la demo, procesaré solo las primeras 20.")
+            uploaded = uploaded[:20]
+
+        pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
+
+else:
+    zip_up = st.file_uploader(
+        "Subí 1 archivo ZIP (con PDFs adentro). Para la demo se procesan hasta 20 PDFs.",
+        type=["zip"],
+        accept_multiple_files=False
+    )
+
+    if zip_up:
+        zip_bytes = zip_up.getvalue()
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+                pdf_names = [
+                    n for n in z.namelist()
+                    if n.lower().endswith(".pdf") and not n.endswith("/")
+                ]
+
+                if not pdf_names:
+                    st.error("El ZIP no contiene archivos .pdf.")
+                else:
+                    if len(pdf_names) > 20:
+                        st.warning(f"El ZIP tiene {len(pdf_names)} PDFs. Para la demo, procesaré solo 20.")
+                        pdf_names = pdf_names[:20]
+
+                    for n in pdf_names:
+                        pdf_files.append({
+                            "name": n.split("/")[-1],   # nombre sin carpetas
+                            "bytes": z.read(n)
+                        })
+
+                    st.success(f"ZIP cargado. PDFs detectados para procesar: {len(pdf_files)}")
+
+        except zipfile.BadZipFile:
+            st.error("El archivo ZIP está dañado o no es un ZIP válido.")
+        except Exception as e:
+            st.error(f"Error leyendo ZIP: {e}")
+
+# ------------------------------ Procesamiento -----------------------------------------
+if pdf_files:
     rows = []
     today = datetime.now().date()
 
     progress = st.progress(0)
-    for i, f in enumerate(uploaded, start=1):
+    for i, f in enumerate(pdf_files, start=1):
         try:
-            file_bytes = f.getvalue()
+            file_bytes = f["bytes"]
 
             with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                 texts = []
@@ -110,7 +158,7 @@ if uploaded:
             status.append("AFIP: Pendiente integración")
 
             rows.append({
-                "Archivo": f.name,
+                "Archivo": f["name"],
                 "CAE": cae or "",
                 "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
                 "Estado": " | ".join(status),
@@ -118,13 +166,13 @@ if uploaded:
 
         except Exception as e:
             rows.append({
-                "Archivo": f.name,
+                "Archivo": f["name"],
                 "CAE": "",
                 "Vto CAE": "",
                 "Estado": f"Error procesando PDF: {e}",
             })
 
-        progress.progress(i / len(uploaded))
+        progress.progress(i / len(pdf_files))
 
     df = pd.DataFrame(rows)
 
