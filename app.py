@@ -176,14 +176,18 @@ if pdf_files:
 
     df = pd.DataFrame(rows)
 
-    # ✅ Excel: evitar notación científica y mantener CAE como identificador
-    df["CAE"] = df["CAE"].astype(str)
+    # ✅ Excel: evitar notación científica (forzar texto de forma compatible)
+    # Excel al abrir CSV "adivina" tipos; anteponemos ' para asegurar texto.
+    df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+
+    # ✅ Limpiar saltos de línea para que no aparezca \n en Excel
+    df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
     st.subheader("Resultados")
     st.dataframe(df, use_container_width=True)
 
-    # ✅ Excel AR: separador ; y encoding con BOM para acentos correctos
-    csv_data = df.to_csv(index=False, sep=";", encoding="utf-8-sig")
+    # ✅ Excel AR: separador ; + UTF-8 con BOM (bytes) para acentos correctos en Excel
+    csv_data = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
 
     st.download_button(
         "Descargar CSV (Excel)",
