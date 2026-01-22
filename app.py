@@ -11,6 +11,15 @@ import requests
 st.set_page_config(page_title="Verificador CAE", layout="wide")
 st.title("Verificador de CAE")
 
+st.markdown(
+    """
+    <div style="display:flex; justify-content:center; margin-top:40px; margin-bottom:40px;">
+        <img src="assets/conexion.gif" style="max-width:420px; width:100%;" />
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 BASE_URL = st.secrets.get("BASE_URL", "")
 DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
 
