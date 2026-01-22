@@ -5,8 +5,17 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 import pdfplumber
+import requests
 
-# --------- Reglas de extracción (robustas para facturas argentinas) ----------
+# ===================== CONFIG =====================
+st.set_page_config(page_title="Verificador CAE", layout="wide")
+st.title("Verificador de CAE")
+
+# Backend URL (ideal: ponerlo en Streamlit Secrets como BASE_URL)
+BASE_URL = st.secrets.get("BASE_URL", "http://localhost:8000")
+DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
+
+# ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
     re.compile(r"\bCAE\b\D{0,30}(\d{14})\b", re.IGNORECASE),
     re.compile(r"\bC\.?A\.?E\.?\b\D{0,30}(\d{14})\b", re.IGNORECASE),
@@ -14,7 +23,6 @@ CAE_PATTERNS = [
     re.compile(r"\bCAE\s*NRO\.?\b\D{0,30}(\d{14})\b", re.IGNORECASE),
 ]
 
-# Abarca: "Vto. CAE", "Vto. de CAE", "Fecha de Vto. de CAE", etc.
 VTO_PATTERNS = [
     re.compile(
         r"(?:Fecha\s+de\s+)?(?:Vto\.?\s*de\s*CAE|Vto\.?\s*CAE|Vencimiento\s*CAE|CAE\s*Vto\.?)\D{0,30}(\d{2}[/-]\d{2}[/-]\d{4})",
@@ -31,7 +39,6 @@ def find_cae(text: str):
         m = pat.search(text)
         if m:
             return m.group(1)
-    # fallback: buscar cualquier 14 dígitos cerca de "CAE"
     idx = text.lower().find("cae")
     if idx != -1:
         window = text[idx: idx + 250]
@@ -61,83 +68,165 @@ def parse_date(date_str: str):
 def basic_format_ok(cae: str) -> bool:
     return bool(cae and re.fullmatch(r"\d{14}", cae))
 
-# ------------------------------ UI -----------------------------------------
-st.set_page_config(page_title="Verificador CAE", layout="wide")
-st.title("Verificador de CAE")
+def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        texts = []
+        for page in pdf.pages[:max_pages]:
+            texts.append(page.extract_text() or "")
+        return "\n".join(texts)
+
+# ===================== SESSION STATE =====================
+def ensure_auth_state():
+    if "auth" not in st.session_state:
+        st.session_state.auth = {
+            "logged": False,
+            "api_key": DEFAULT_BACKEND_API_KEY,
+            "access_token": "",
+            "cuit": ""
+        }
+
+ensure_auth_state()
+
+# ===================== BACKEND CALLS =====================
+def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
+    r = requests.post(
+        f"{base_url}/auth/login",
+        json={"cuit": cuit, "password": password},
+        headers={"X-API-Key": api_key} if api_key else {},
+        timeout=30,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Login falló ({r.status_code}): {r.text}")
+    data = r.json()
+    token = data.get("access_token")
+    if not token:
+        raise RuntimeError("Login OK pero el backend no devolvió access_token.")
+    return token
+
+def backend_verify(
+    base_url: str,
+    api_key: str,
+    access_token: str,
+    cuit_emisor: str,
+    cert_bytes: bytes,
+    key_bytes: bytes,
+    pdf_items: list,
+):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+    }
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    files = []
+    for it in pdf_items:
+        files.append(("files", (it["name"], it["bytes"], "application/pdf")))
+
+    files.append(("cert", ("certificado.crt", cert_bytes, "application/x-x509-ca-cert")))
+    files.append(("pkey", ("private.key", key_bytes, "application/octet-stream")))
+
+    data = {"cuit": cuit_emisor}
+
+    r = requests.post(
+        f"{base_url}/verify",
+        headers=headers,
+        data=data,
+        files=files,
+        timeout=180,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
+    return r.json()
+
+# ===================== SIDEBAR: LOGIN + CREDENCIALES AFIP =====================
+with st.sidebar:
+    st.subheader("Login")
+    st.text_input("Backend Base URL", value=BASE_URL, key="base_url_ui")
+    api_key = st.session_state.auth["api_key"]
+
+    cuit_login_default = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
+    cuit_login = st.text_input("CUIT", value=st.session_state.auth["cuit"] or cuit_login_default)
+    password = st.text_input("Contraseña", type="password")
+
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("Ingresar"):
+            try:
+                token = backend_login(st.session_state["base_url_ui"], api_key, cuit_login, password)
+                st.session_state.auth = {
+                    "logged": True,
+                    "api_key": api_key,
+                    "access_token": token,
+                    "cuit": cuit_login
+                }
+                st.success("Sesión iniciada.")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    with colB:
+        if st.button("Salir"):
+            st.session_state.auth = {"logged": False, "api_key": "", "access_token": "", "cuit": ""}
+            st.rerun()
+
+    st.divider()
+    st.subheader("Credenciales AFIP (Maxi)")
+    st.caption("Para demo: se cargan por UI. En producción: se guardan cifradas en backend por tenant.")
+
+    cuit_emisor = st.text_input("CUIT emisor a validar (Maxi)", placeholder="20XXXXXXXXX")
+
+    cert_file = st.file_uploader("certificado.crt (.crt/.cer)", type=["crt", "cer"])
+    key_file = st.file_uploader("private.key (.key)", type=["key"])
+
+if not st.session_state.auth["logged"]:
+    st.info("Iniciá sesión para habilitar carga y validación.")
+    st.stop()
 
 st.info(
-    "Esta demo extrae CAE y vencimiento desde PDF. "
-    "La verificación 'real' contra AFIP (existencia/correspondencia) se integra en la siguiente fase."
+    "Flujo: extraemos CAE/Vto desde PDF localmente. "
+    "Si cargás CUIT+CRT+KEY, consultamos AFIP vía backend y completamos la columna AFIP."
 )
 
+# ===================== CARGA ARCHIVOS =====================
 st.subheader("Carga de archivos")
 mode = st.radio("Modo de carga", ["PDFs (hasta 20)", "ZIP (contiene PDFs)"], horizontal=True)
 
-pdf_files = []  # lista de dicts: {"name": str, "bytes": bytes}
+pdf_files = []
 
 if mode == "PDFs (hasta 20)":
     uploaded = st.file_uploader("Subí hasta 20 facturas en PDF", type=["pdf"], accept_multiple_files=True)
-
     if uploaded:
         if len(uploaded) > 20:
             st.warning("Subiste más de 20. Para la demo, procesaré solo las primeras 20.")
             uploaded = uploaded[:20]
-
         pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
 
 else:
-    zip_up = st.file_uploader(
-        "Subí 1 archivo ZIP (con PDFs adentro). Para la demo se procesan hasta 20 PDFs.",
-        type=["zip"],
-        accept_multiple_files=False
-    )
-
+    zip_up = st.file_uploader("Subí 1 archivo ZIP (con PDFs). Para la demo se procesan hasta 20.", type=["zip"])
     if zip_up:
-        zip_bytes = zip_up.getvalue()
-
         try:
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-                pdf_names = [
-                    n for n in z.namelist()
-                    if n.lower().endswith(".pdf") and not n.endswith("/")
-                ]
-
-                if not pdf_names:
-                    st.error("El ZIP no contiene archivos .pdf.")
+            with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
+                names = [n for n in z.namelist() if n.lower().endswith(".pdf") and not n.endswith("/")]
+                if not names:
+                    st.error("El ZIP no contiene PDFs.")
                 else:
-                    if len(pdf_names) > 20:
-                        st.warning(f"El ZIP tiene {len(pdf_names)} PDFs. Para la demo, procesaré solo 20.")
-                        pdf_names = pdf_names[:20]
-
-                    for n in pdf_names:
-                        pdf_files.append({
-                            "name": n.split("/")[-1],   # nombre sin carpetas
-                            "bytes": z.read(n)
-                        })
-
-                    st.success(f"ZIP cargado. PDFs detectados para procesar: {len(pdf_files)}")
-
+                    if len(names) > 20:
+                        st.warning(f"El ZIP tiene {len(names)} PDFs. Para demo procesaré solo 20.")
+                        names = names[:20]
+                    pdf_files = [{"name": n.split('/')[-1], "bytes": z.read(n)} for n in names]
+                    st.success(f"PDFs detectados: {len(pdf_files)}")
         except zipfile.BadZipFile:
-            st.error("El archivo ZIP está dañado o no es un ZIP válido.")
-        except Exception as e:
-            st.error(f"Error leyendo ZIP: {e}")
+            st.error("ZIP inválido o dañado.")
 
-# ------------------------------ Procesamiento -----------------------------------------
+# ===================== PREVALIDACIÓN LOCAL =====================
+rows = []
 if pdf_files:
-    rows = []
     today = datetime.now().date()
-
     progress = st.progress(0)
+
     for i, f in enumerate(pdf_files, start=1):
         try:
-            file_bytes = f["bytes"]
-
-            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                texts = []
-                for page in pdf.pages[:5]:
-                    texts.append(page.extract_text() or "")
-                text = "\n".join(texts)
-
+            text = extract_text_pdf(f["bytes"], max_pages=5)
             cae = find_cae(text)
             vto_raw = find_vto(text)
             vto_date = parse_date(vto_raw)
@@ -155,13 +244,14 @@ if pdf_files:
                 status.append("Vigente" if vig_ok else "Vencido")
             else:
                 status.append("Vto no detectado")
-            status.append("AFIP: Pendiente integración")
 
             rows.append({
                 "Archivo": f["name"],
                 "CAE": cae or "",
                 "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
                 "Estado": " | ".join(status),
+                "AFIP": "",
+                "Detalle AFIP": "",
             })
 
         except Exception as e:
@@ -169,36 +259,77 @@ if pdf_files:
                 "Archivo": f["name"],
                 "CAE": "",
                 "Vto CAE": "",
-                "Estado": f"Error procesando PDF: {e}",
+                "Estado": f"Error PDF: {e}",
+                "AFIP": "",
+                "Detalle AFIP": "",
             })
 
         progress.progress(i / len(pdf_files))
 
-    df = pd.DataFrame(rows)
+df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo","CAE","Vto CAE","Estado","AFIP","Detalle AFIP"])
 
-    # ✅ Excel: forzar CAE como texto para evitar notación científica al abrir CSV
-    df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+st.subheader("Resultados (extracción local)")
+st.dataframe(df, use_container_width=True)
 
-    # ✅ Limpiar saltos de línea
-    df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
+# ===================== VALIDACIÓN AFIP VIA BACKEND =====================
+st.subheader("Validación AFIP (via backend)")
+st.caption("Requiere que tu backend implemente POST /verify y consulte WSAA/WSFE con las credenciales del emisor.")
 
-    st.subheader("Resultados")
-    st.dataframe(df, use_container_width=True)
+if st.button("Validar contra AFIP ahora"):
+    if not pdf_files:
+        st.error("Primero cargá PDFs o ZIP.")
+        st.stop()
+    if not cuit_emisor:
+        st.error("Falta CUIT emisor (Maxi).")
+        st.stop()
+    if not cert_file or not key_file:
+        st.error("Faltan credenciales AFIP: certificado (.crt) y clave privada (.key).")
+        st.stop()
 
-    # ✅ CSV compatible Excel AR: separador ; + UTF-8 con BOM (en bytes)
-    csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+    try:
+        with st.spinner("Consultando AFIP (via backend)..."):
+            result = backend_verify(
+                base_url=st.session_state["base_url_ui"],
+                api_key=st.session_state.auth["api_key"],
+                access_token=st.session_state.auth["access_token"],
+                cuit_emisor=cuit_emisor,
+                cert_bytes=cert_file.getvalue(),
+                key_bytes=key_file.getvalue(),
+                pdf_items=pdf_files,
+            )
+
+        backend_rows = result.get("rows", [])
+        if backend_rows:
+            df = pd.DataFrame(backend_rows)
+            st.success("Validación AFIP completada.")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("El backend no devolvió rows. Revisá /verify.")
+
+    except Exception as e:
+        st.error(str(e))
+
+# ===================== EXPORTS (CSV + XLSX) =====================
+if not df.empty:
+    # CAE como texto (evitar notación científica en Excel)
+    if "CAE" in df.columns:
+        df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+
+    # limpiar saltos de línea
+    if "Estado" in df.columns:
+        df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
     col1, col2 = st.columns(2)
 
     with col1:
+        csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(
             "Descargar CSV (Excel)",
             data=csv_bytes,
-            file_name="resultado_verificacion_cae_demo.csv",
+            file_name="resultado_verificacion_cae.csv",
             mime="text/csv",
         )
 
-    # ✅ Excel real (.xlsx): evita cualquier problema de separadores/encoding
     with col2:
         xlsx_buffer = io.BytesIO()
         with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
@@ -206,6 +337,6 @@ if pdf_files:
         st.download_button(
             "Descargar Excel (.xlsx)",
             data=xlsx_buffer.getvalue(),
-            file_name="resultado_verificacion_cae_demo.xlsx",
+            file_name="resultado_verificacion_cae.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
