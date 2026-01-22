@@ -1,11 +1,12 @@
 import os
 import io
 import re
+import base64
 from datetime import datetime
 from typing import List, Optional
 
 import pdfplumber
-from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 app = FastAPI()
@@ -16,6 +17,12 @@ MAXI_PASSWORD = os.getenv("MAXI_PASSWORD", "")
 BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "")
 DEMO_ACCESS_TOKEN = os.getenv("DEMO_ACCESS_TOKEN", "DEMO_TOKEN_OK")
 
+# ===================== AFIP SERVER CREDENTIALS (PROD STYLE) =====================
+# Guardar CRT/KEY en Render como env vars en Base64 (no via UI).
+AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
+AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
+AFIP_CUIT = os.getenv("AFIP_CUIT", "") or MAXI_CUIT  # default
+
 class LoginRequest(BaseModel):
     cuit: str
     password: str
@@ -25,12 +32,29 @@ def check_api_key(x_api_key: str):
         raise HTTPException(status_code=401, detail="API key inválida")
 
 def check_bearer(authorization: str):
-    # Demo simple: token fijo. En prod: JWT con expiración.
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Falta Authorization Bearer token")
     token = authorization.split(" ", 1)[1].strip()
     if token != DEMO_ACCESS_TOKEN:
         raise HTTPException(status_code=401, detail="Token inválido")
+
+def get_afip_credentials_bytes():
+    """
+    En producción: credenciales AFIP viven en servidor (Render env vars / vault).
+    Acá las leemos en Base64 y devolvemos bytes.
+    """
+    if not AFIP_CERT_B64 or not AFIP_KEY_B64:
+        # Para demo: no rompemos; simplemente marcamos AFIP como PENDIENTE por falta credenciales.
+        return None, None
+
+    try:
+        cert_bytes = base64.b64decode(AFIP_CERT_B64)
+        key_bytes = base64.b64decode(AFIP_KEY_B64)
+        if not cert_bytes or not key_bytes:
+            return None, None
+        return cert_bytes, key_bytes
+    except Exception:
+        return None, None
 
 @app.post("/auth/login")
 def login(payload: LoginRequest, x_api_key: str = Header(default="")):
@@ -105,30 +129,27 @@ def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
             texts.append(page.extract_text() or "")
         return "\n".join(texts)
 
-# ===================== VERIFY ENDPOINT =====================
+# ===================== VERIFY ENDPOINT (PROD STYLE) =====================
 @app.post("/verify")
 async def verify(
-    cuit: str = Form(...),                              # CUIT emisor a validar (Maxi)
     files: List[UploadFile] = File(...),                # PDFs
-    cert: UploadFile = File(...),                       # certificado.crt
-    pkey: UploadFile = File(...),                       # private.key
     x_api_key: str = Header(default=""),
     authorization: str = Header(default=""),
 ):
     """
-    Para demo:
+    Producción: el frontend NO sube CRT/KEY.
+    El backend usa credenciales del servidor (Render env vars / vault).
+
+    Hoy:
       - extrae CAE y Vto desde los PDFs
       - valida formato/vigencia
-      - devuelve AFIP=PENDIENTE (hook para WSAA/WSFE real)
+      - AFIP queda PENDIENTE hasta implementar WSAA/WSFE real
     """
     check_api_key(x_api_key)
     check_bearer(authorization)
 
-    # Leemos credenciales (por ahora solo validamos que existan bytes)
-    cert_bytes = await cert.read()
-    key_bytes = await pkey.read()
-    if not cert_bytes or not key_bytes:
-        raise HTTPException(status_code=400, detail="Certificado o clave privada vacíos")
+    cert_bytes, key_bytes = get_afip_credentials_bytes()
+    has_afip_creds = bool(cert_bytes and key_bytes and AFIP_CUIT)
 
     today = datetime.now().date()
     out_rows = []
@@ -157,11 +178,16 @@ async def verify(
                 estado.append("Vto no detectado")
 
             # ===== Hook AFIP REAL =====
-            # Acá vas a implementar WSAA (token/sign) + WSFE (FECompConsultar)
-            # usando: cuit, cert_bytes, key_bytes y datos del comprobante.
-            # Por ahora lo dejamos preparado:
-            afip_status = "PENDIENTE"
-            afip_detail = "AFIP: Integración pendiente (WSAA/WSFE)"
+            # Acá vas a implementar WSAA (token/sign) + WSFE (FECompConsultar).
+            # Inputs disponibles en servidor:
+            #   - AFIP_CUIT
+            #   - cert_bytes / key_bytes
+            if has_afip_creds:
+                afip_status = "PENDIENTE"
+                afip_detail = "AFIP: Integración pendiente (WSAA/WSFE) - credenciales OK en servidor"
+            else:
+                afip_status = "PENDIENTE"
+                afip_detail = "AFIP: faltan credenciales en servidor (AFIP_CERT_B64 / AFIP_KEY_B64 / AFIP_CUIT)"
 
             out_rows.append({
                 "Archivo": f.filename,

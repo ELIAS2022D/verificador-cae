@@ -11,9 +11,12 @@ import requests
 st.set_page_config(page_title="Verificador CAE", layout="wide")
 st.title("Verificador de CAE")
 
-# Backend URL (ideal: ponerlo en Streamlit Secrets como BASE_URL)
-BASE_URL = st.secrets.get("BASE_URL", "http://localhost:8000")
+BASE_URL = st.secrets.get("BASE_URL", "")
 DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
+
+if not BASE_URL:
+    st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
+    st.stop()
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
@@ -107,14 +110,9 @@ def backend_verify(
     base_url: str,
     api_key: str,
     access_token: str,
-    cuit_emisor: str,
-    cert_bytes: bytes,
-    key_bytes: bytes,
     pdf_items: list,
 ):
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-    }
+    headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
         headers["X-API-Key"] = api_key
 
@@ -122,15 +120,9 @@ def backend_verify(
     for it in pdf_items:
         files.append(("files", (it["name"], it["bytes"], "application/pdf")))
 
-    files.append(("cert", ("certificado.crt", cert_bytes, "application/x-x509-ca-cert")))
-    files.append(("pkey", ("private.key", key_bytes, "application/octet-stream")))
-
-    data = {"cuit": cuit_emisor}
-
     r = requests.post(
         f"{base_url}/verify",
         headers=headers,
-        data=data,
         files=files,
         timeout=180,
     )
@@ -138,10 +130,9 @@ def backend_verify(
         raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
     return r.json()
 
-# ===================== SIDEBAR: LOGIN + CREDENCIALES AFIP =====================
+# ===================== SIDEBAR: LOGIN =====================
 with st.sidebar:
     st.subheader("Login")
-    st.text_input("Backend Base URL", value=BASE_URL, key="base_url_ui")
     api_key = st.session_state.auth["api_key"]
 
     cuit_login_default = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
@@ -152,7 +143,7 @@ with st.sidebar:
     with colA:
         if st.button("Ingresar"):
             try:
-                token = backend_login(st.session_state["base_url_ui"], api_key, cuit_login, password)
+                token = backend_login(BASE_URL, api_key, cuit_login, password)
                 st.session_state.auth = {
                     "logged": True,
                     "api_key": api_key,
@@ -166,17 +157,13 @@ with st.sidebar:
 
     with colB:
         if st.button("Salir"):
-            st.session_state.auth = {"logged": False, "api_key": "", "access_token": "", "cuit": ""}
+            st.session_state.auth = {
+                "logged": False,
+                "api_key": DEFAULT_BACKEND_API_KEY,
+                "access_token": "",
+                "cuit": ""
+            }
             st.rerun()
-
-    st.divider()
-    st.subheader("Credenciales AFIP (Maxi)")
-    st.caption("Para demo: se cargan por UI. En producción: se guardan cifradas en backend por tenant.")
-
-    cuit_emisor = st.text_input("CUIT emisor a validar (Maxi)", placeholder="20XXXXXXXXX")
-
-    cert_file = st.file_uploader("certificado.crt (.crt/.cer)", type=["crt", "cer"])
-    key_file = st.file_uploader("private.key (.key)", type=["key"])
 
 if not st.session_state.auth["logged"]:
     st.info("Iniciá sesión para habilitar carga y validación.")
@@ -184,7 +171,7 @@ if not st.session_state.auth["logged"]:
 
 st.info(
     "Flujo: extraemos CAE/Vto desde PDF localmente. "
-    "Si cargás CUIT+CRT+KEY, consultamos AFIP vía backend y completamos la columna AFIP."
+    "La validación AFIP se realiza en backend con credenciales gestionadas del lado servidor."
 )
 
 # ===================== CARGA ARCHIVOS =====================
@@ -266,35 +253,28 @@ if pdf_files:
 
         progress.progress(i / len(pdf_files))
 
-df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo","CAE","Vto CAE","Estado","AFIP","Detalle AFIP"])
+df = pd.DataFrame(rows) if rows else pd.DataFrame(
+    columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]
+)
 
 st.subheader("Resultados (extracción local)")
 st.dataframe(df, use_container_width=True)
 
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
 st.subheader("Validación AFIP (via backend)")
-st.caption("Requiere que tu backend implemente POST /verify y consulte WSAA/WSFE con las credenciales del emisor.")
+st.caption("El backend valida contra AFIP y devuelve el estado por archivo.")
 
 if st.button("Validar contra AFIP ahora"):
     if not pdf_files:
         st.error("Primero cargá PDFs o ZIP.")
         st.stop()
-    if not cuit_emisor:
-        st.error("Falta CUIT emisor (Maxi).")
-        st.stop()
-    if not cert_file or not key_file:
-        st.error("Faltan credenciales AFIP: certificado (.crt) y clave privada (.key).")
-        st.stop()
 
     try:
         with st.spinner("Consultando AFIP (via backend)..."):
             result = backend_verify(
-                base_url=st.session_state["base_url_ui"],
+                base_url=BASE_URL,
                 api_key=st.session_state.auth["api_key"],
                 access_token=st.session_state.auth["access_token"],
-                cuit_emisor=cuit_emisor,
-                cert_bytes=cert_file.getvalue(),
-                key_bytes=key_file.getvalue(),
                 pdf_items=pdf_files,
             )
 
@@ -311,11 +291,9 @@ if st.button("Validar contra AFIP ahora"):
 
 # ===================== EXPORTS (CSV + XLSX) =====================
 if not df.empty:
-    # CAE como texto (evitar notación científica en Excel)
     if "CAE" in df.columns:
         df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
 
-    # limpiar saltos de línea
     if "Estado" in df.columns:
         df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
