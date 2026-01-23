@@ -2,8 +2,10 @@ import os
 import io
 import re
 import base64
-from datetime import datetime
+import subprocess
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
+import xml.etree.ElementTree as ET
 
 import pdfplumber
 import requests
@@ -16,7 +18,7 @@ from pydantic import BaseModel
 app = FastAPI(title="Verificador CAE Backend", version="1.0.0")
 
 # ============================================================
-# AUTH (LOGIN DE TU SISTEMA, NO AFIP)
+# AUTH (LOGIN DE TU SISTEMA)
 # ============================================================
 MAXI_CUIT = os.getenv("MAXI_CUIT", "")
 MAXI_PASSWORD = os.getenv("MAXI_PASSWORD", "")
@@ -32,10 +34,7 @@ def check_api_key(x_api_key: str):
         raise HTTPException(status_code=401, detail="API key inválida")
 
 def check_bearer(authorization: str):
-    """
-    Para producción real, reemplazar por JWT con expiración.
-    Para esta demo/prod-mvp: token fijo por env.
-    """
+    # Producción real: JWT con exp. Hoy: token fijo por env.
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Falta Authorization Bearer token")
     token = authorization.split(" ", 1)[1].strip()
@@ -49,10 +48,8 @@ def health():
 @app.post("/auth/login")
 def login(payload: LoginRequest, x_api_key: str = Header(default="")):
     check_api_key(x_api_key)
-
     if payload.cuit != MAXI_CUIT or payload.password != MAXI_PASSWORD:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
-
     return {"access_token": DEMO_ACCESS_TOKEN}
 
 # ============================================================
@@ -76,31 +73,24 @@ VTO_PATTERNS = [
     ),
 ]
 
-# Intentos para datos típicos de factura:
+# Para tus PDFs reales (como el que pasaste): “COD. 01”
+CBTETIPO_PATTERNS = [
+    re.compile(r"\bCOD\.?\s*(\d{1,3})\b", re.IGNORECASE),
+    re.compile(r"\bC[oó]digo\s*(\d{1,3})\b", re.IGNORECASE),
+]
+
 PTOVTA_PATTERNS = [
-    re.compile(r"\bP(?:unto)?\s*de\s*V(?:enta)?\b\D{0,15}(\d{1,5})", re.IGNORECASE),
-    re.compile(r"\bPto\.?\s*Vta\.?\b\D{0,15}(\d{1,5})", re.IGNORECASE),
-    re.compile(r"\bPtoVta\b\D{0,15}(\d{1,5})", re.IGNORECASE),
+    re.compile(r"\bPunto\s+de\s+Venta:\s*(\d{1,5})\b", re.IGNORECASE),
+    re.compile(r"\bPto\.?\s*Vta\.?:?\s*(\d{1,5})\b", re.IGNORECASE),
+    # fallback: 00001-00000061
+    re.compile(r"\b(\d{4,5})\s*[-/]\s*(\d{6,10})\b"),
 ]
 
-CBTE_NRO_PATTERNS = [
-    re.compile(r"\bN[º°o]\s*Comprobante\b\D{0,20}(\d{1,12})", re.IGNORECASE),
-    re.compile(r"\bComp\.?\s*N[º°o]?\b\D{0,20}(\d{1,12})", re.IGNORECASE),
-    re.compile(r"\bN[º°o]\b\D{0,10}(\d{1,12})", re.IGNORECASE),
-]
-
-FECHA_CBTE_PATTERNS = [
-    re.compile(r"\bFecha\b\D{0,20}(\d{2}[/-]\d{2}[/-]\d{4})", re.IGNORECASE),
-    re.compile(r"\bFecha\b\D{0,20}(\d{4}[/-]\d{2}[/-]\d{2})", re.IGNORECASE),
-]
-
-CUIT_PATTERNS = [
-    re.compile(r"\bCUIT\b\D{0,20}(\d{2}-?\d{8}-?\d{1})\b", re.IGNORECASE),
-]
-
-IMPORTE_PATTERNS = [
-    re.compile(r"\bImporte\s*Total\b\D{0,20}\$?\s*([\d\.\,]+)", re.IGNORECASE),
-    re.compile(r"\bTotal\b\D{0,20}\$?\s*([\d\.\,]+)", re.IGNORECASE),
+CBTENRO_PATTERNS = [
+    re.compile(r"\bComp\.?\s*Nro:?\s*(\d{1,12})\b", re.IGNORECASE),
+    re.compile(r"\bComprobante\s*N[º°o]?:?\s*(\d{1,12})\b", re.IGNORECASE),
+    # fallback: 00001-00000061
+    re.compile(r"\b(\d{4,5})\s*[-/]\s*(\d{6,10})\b"),
 ]
 
 def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
@@ -114,13 +104,27 @@ def find_first(patterns, text: str) -> Optional[str]:
     for pat in patterns:
         m = pat.search(text)
         if m:
+            # si es el fallback 00001-00000061 devolvemos el grupo correcto según el caller
             return m.group(1)
     return None
 
-def normalize_cuit(raw: str) -> str:
-    if not raw:
-        return ""
-    return re.sub(r"\D", "", raw)
+def find_ptovta(text: str) -> Optional[str]:
+    for pat in PTOVTA_PATTERNS:
+        m = pat.search(text)
+        if m:
+            if m.lastindex == 2:  # caso 00001-00000061
+                return m.group(1)
+            return m.group(1)
+    return None
+
+def find_cbtenro(text: str) -> Optional[str]:
+    for pat in CBTENRO_PATTERNS:
+        m = pat.search(text)
+        if m:
+            if m.lastindex == 2:  # caso 00001-00000061
+                return m.group(2)
+            return m.group(1)
+    return None
 
 def parse_date(date_str: Optional[str]):
     if not date_str:
@@ -133,65 +137,242 @@ def parse_date(date_str: Optional[str]):
             pass
     return None
 
-def parse_amount(s: Optional[str]) -> Optional[float]:
-    if not s:
-        return None
-    # típico AR: 1.234,56
-    t = s.strip().replace(".", "").replace(",", ".")
-    try:
-        return float(t)
-    except ValueError:
-        return None
-
 def basic_format_ok(cae: Optional[str]) -> bool:
     return bool(cae and re.fullmatch(r"\d{14}", cae))
 
 # ============================================================
-# AFIP (WSAA + WSCDC) - CONFIG
+# AFIP CONFIG (WSAA + WSFE)
 # ============================================================
-AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # "prod" | "homo"
-AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()            # tu CUIT (emisor)
+AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
+AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
+
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
 AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
 
-# WSAA endpoints (suelen ser estables)
 WSAA_URLS = {
     "prod": "https://wsaa.afip.gov.ar/ws/services/LoginCms",
     "homo": "https://wsaahomo.afip.gov.ar/ws/services/LoginCms",
 }
 
-# WSCDC endpoints (Constatación de Comprobantes)
-WSCDC_URLS = {
-    "prod": "https://servicios1.afip.gov.ar/WSCDC/service.asmx",
-    "homo": "https://wswhomo.afip.gov.ar/WSCDC/service.asmx",
+WSFE_URLS = {
+    "prod": "https://servicios1.afip.gov.ar/wsfev1/service.asmx",
+    "homo": "https://wswhomo.afip.gov.ar/wsfev1/service.asmx",
 }
 
 def require_afip_env():
     if AFIP_ENV not in ("prod", "homo"):
         raise HTTPException(status_code=500, detail="AFIP_ENV debe ser 'prod' o 'homo'")
     if not AFIP_CUIT:
-        raise HTTPException(status_code=500, detail="Falta AFIP_CUIT en variables de entorno del backend")
+        raise HTTPException(status_code=500, detail="Falta AFIP_CUIT en variables de entorno")
     if not AFIP_CERT_B64 or not AFIP_KEY_B64:
-        raise HTTPException(status_code=500, detail="Faltan AFIP_CERT_B64 y/o AFIP_KEY_B64 en variables de entorno del backend")
+        raise HTTPException(status_code=500, detail="Faltan AFIP_CERT_B64 y/o AFIP_KEY_B64 en variables de entorno")
+
+def b64_to_bytes(s: str) -> bytes:
+    return base64.b64decode(s.encode("utf-8"))
+
+# Cache simple del TA (token+sign) en memoria del proceso
+_TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
+
+def build_tra(service: str) -> str:
+    # WSAA es sensible a relojes desfasados; damos margen. :contentReference[oaicite:1]{index=1}
+    now = datetime.now(timezone.utc)
+    gen = now - timedelta(minutes=5)
+    exp = now + timedelta(hours=8)
+
+    tra = f"""<?xml version="1.0" encoding="UTF-8"?>
+<loginTicketRequest version="1.0">
+  <header>
+    <uniqueId>{int(now.timestamp())}</uniqueId>
+    <generationTime>{gen.isoformat()}</generationTime>
+    <expirationTime>{exp.isoformat()}</expirationTime>
+  </header>
+  <service>{service}</service>
+</loginTicketRequest>"""
+    return tra
+
+def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> bytes:
+    """
+    Firma CMS (PKCS#7) usando openssl.
+    """
+    # Escribimos archivos temporales
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        cert_path = os.path.join(tmp, "cert.crt")
+        key_path = os.path.join(tmp, "private.key")
+        tra_path = os.path.join(tmp, "tra.xml")
+        out_path = os.path.join(tmp, "tra.cms")
+
+        with open(cert_path, "wb") as f:
+            f.write(cert_pem)
+        with open(key_path, "wb") as f:
+            f.write(key_pem)
+        with open(tra_path, "wb") as f:
+            f.write(tra_xml.encode("utf-8"))
+
+        # CMS DER
+        cmd = [
+            "openssl", "smime", "-sign",
+            "-signer", cert_path,
+            "-inkey", key_path,
+            "-in", tra_path,
+            "-out", out_path,
+            "-outform", "DER",
+            "-nodetach",
+            "-binary"
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except FileNotFoundError:
+            raise RuntimeError("No se encontró 'openssl' en el entorno. En Render normalmente viene instalado; si no, hay que instalarlo.")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"OpenSSL error: {e.stderr.decode('utf-8', 'ignore')}")
+
+        with open(out_path, "rb") as f:
+            return f.read()
+
+def wsaa_login_get_ta(service: str = "wsfe") -> Dict[str, str]:
+    """
+    Devuelve token+sign, usando cache si no expiró.
+    """
+    now = datetime.now(timezone.utc)
+    if _TA_CACHE["token"] and _TA_CACHE["sign"] and _TA_CACHE["exp_utc"]:
+        # margen 2 min
+        if now + timedelta(minutes=2) < _TA_CACHE["exp_utc"]:
+            return {"token": _TA_CACHE["token"], "sign": _TA_CACHE["sign"]}
+
+    cert_bytes = b64_to_bytes(AFIP_CERT_B64)
+    key_bytes = b64_to_bytes(AFIP_KEY_B64)
+
+    tra_xml = build_tra(service=service)
+    cms_der = sign_tra_with_openssl(tra_xml, cert_bytes, key_bytes)
+    cms_b64 = base64.b64encode(cms_der).decode("utf-8")
+
+    # SOAP loginCms
+    wsaa_url = WSAA_URLS[AFIP_ENV]
+    soap = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <loginCms xmlns="http://wsaa.view.sua.dvadac.desein.afip.gov">
+      <in0>{cms_b64}</in0>
+    </loginCms>
+  </soap:Body>
+</soap:Envelope>"""
+
+    r = requests.post(wsaa_url, data=soap.encode("utf-8"), headers={"Content-Type": "text/xml; charset=utf-8"}, timeout=40)
+    if r.status_code != 200:
+        raise RuntimeError(f"WSAA HTTP {r.status_code}: {r.text[:600]}")
+
+    # Parse: loginCmsReturn contiene XML TA
+    root = ET.fromstring(r.text)
+    # buscamos cualquier tag que termine en loginCmsReturn
+    ta_xml = None
+    for el in root.iter():
+        if el.tag.endswith("loginCmsReturn"):
+            ta_xml = el.text
+            break
+    if not ta_xml:
+        raise RuntimeError("WSAA: no se encontró loginCmsReturn en la respuesta.")
+
+    ta_root = ET.fromstring(ta_xml)
+    token = ta_root.findtext(".//token")
+    sign = ta_root.findtext(".//sign")
+    exp_s = ta_root.findtext(".//expirationTime")
+    if not token or not sign or not exp_s:
+        raise RuntimeError("WSAA: TA incompleto (token/sign/expirationTime).")
+
+    exp_utc = datetime.fromisoformat(exp_s.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+    _TA_CACHE["token"] = token
+    _TA_CACHE["sign"] = sign
+    _TA_CACHE["exp_utc"] = exp_utc
+
+    return {"token": token, "sign": sign}
+
+def wsfe_comp_consultar(cbte_tipo: int, pto_vta: int, cbte_nro: int) -> Dict[str, Any]:
+    """
+    Llama WSFEv1 FECompConsultar y devuelve CAE y vto reales (si existe).
+    Endpoints WSFE: prod/homo según documentación AFIP. :contentReference[oaicite:2]{index=2}
+    """
+    ta = wsaa_login_get_ta(service="wsfe")  # service = "wsfe" (WSFEv1)
+
+    wsfe_url = WSFE_URLS[AFIP_ENV]
+    cuit = AFIP_CUIT
+
+    soap = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:ar="http://ar.gov.afip.dif.FEV1/">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <ar:FECompConsultar>
+      <ar:Auth>
+        <ar:Token>{ta["token"]}</ar:Token>
+        <ar:Sign>{ta["sign"]}</ar:Sign>
+        <ar:Cuit>{cuit}</ar:Cuit>
+      </ar:Auth>
+      <ar:FeCompConsReq>
+        <ar:CbteTipo>{cbte_tipo}</ar:CbteTipo>
+        <ar:PtoVta>{pto_vta}</ar:PtoVta>
+        <ar:CbteNro>{cbte_nro}</ar:CbteNro>
+      </ar:FeCompConsReq>
+    </ar:FECompConsultar>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+
+    r = requests.post(wsfe_url, data=soap.encode("utf-8"), headers={"Content-Type": "text/xml; charset=utf-8"}, timeout=50)
+    if r.status_code != 200:
+        raise RuntimeError(f"WSFE HTTP {r.status_code}: {r.text[:600]}")
+
+    # Parse básico: buscamos CAE y CAEFchVto dentro del response
+    root = ET.fromstring(r.text)
+
+    # Errores?
+    err_code = None
+    err_msg = None
+    for el in root.iter():
+        if el.tag.endswith("Code"):
+            # ojo: hay Code en varios nodos; el de Errors suele estar en ar:Errors
+            pass
+
+    cae = None
+    cae_vto = None
+    # tags comunes en FEV1: <CAE> y <CAEFchVto>
+    for el in root.iter():
+        if el.tag.endswith("CAE"):
+            if el.text and el.text.strip():
+                cae = el.text.strip()
+        if el.tag.endswith("CAEFchVto"):
+            if el.text and el.text.strip():
+                cae_vto = el.text.strip()
+
+    # Si no hay CAE, probablemente no existe o no autorizado (o error)
+    # también capturamos errores si aparecen:
+    errors = []
+    in_errors = False
+    for el in root.iter():
+        if el.tag.endswith("Errors"):
+            in_errors = True
+        if in_errors and el.tag.endswith("Err"):
+            # armamos mini-dict
+            code = el.findtext(".//*[local-name()='Code']")
+            msg = el.findtext(".//*[local-name()='Msg']")
+            if code or msg:
+                errors.append({"code": code, "msg": msg})
+        if el.tag.endswith("Errors"):
+            in_errors = False
+
+    return {"cae": cae, "cae_vto": cae_vto, "errors": errors, "raw": r.text}
 
 # ============================================================
-# /verify - PRODUCCIÓN (cert/key en env, cuit en env)
+# VERIFY ENDPOINT (PROD)
 # ============================================================
 @app.post("/verify")
 async def verify(
-    files: List[UploadFile] = File(...),      # PDFs
+    files: List[UploadFile] = File(...),
     x_api_key: str = Header(default=""),
     authorization: str = Header(default=""),
 ):
-    """
-    Producción:
-    - El front NO manda CUIT/CRT/KEY.
-    - El backend toma AFIP_CUIT + AFIP_CERT_B64 + AFIP_KEY_B64 desde Render env.
-    - Extrae datos del PDF y (si hay datos suficientes) deja listo para WSAA+WSCDC real.
-    """
     check_api_key(x_api_key)
     check_bearer(authorization)
-
     require_afip_env()
 
     today = datetime.now().date()
@@ -202,90 +383,129 @@ async def verify(
             pdf_bytes = await f.read()
             text = extract_text_pdf(pdf_bytes, max_pages=5)
 
-            cae = find_first(CAE_PATTERNS, text)
+            cae_pdf = find_first(CAE_PATTERNS, text)
             vto_raw = find_first(VTO_PATTERNS, text)
-            vto_date = parse_date(vto_raw)
+            vto_pdf = parse_date(vto_raw)
 
-            pto_vta = find_first(PTOVTA_PATTERNS, text)
-            cbte_nro = find_first(CBTE_NRO_PATTERNS, text)
-            fecha_cbte_raw = find_first(FECHA_CBTE_PATTERNS, text)
-            fecha_cbte = parse_date(fecha_cbte_raw)
+            cbte_tipo_raw = find_first(CBTETIPO_PATTERNS, text)
+            pto_vta_raw = find_ptovta(text)
+            cbte_nro_raw = find_cbtenro(text)
 
-            cuit_en_pdf_raw = find_first(CUIT_PATTERNS, text)
-            cuit_en_pdf = normalize_cuit(cuit_en_pdf_raw)
+            # Normalizaciones
+            cbte_tipo = int(cbte_tipo_raw) if cbte_tipo_raw else None
+            pto_vta = int(pto_vta_raw) if pto_vta_raw else None
+            cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
 
-            imp_total_raw = find_first(IMPORTE_PATTERNS, text)
-            imp_total = parse_amount(imp_total_raw)
-
-            fmt_ok = basic_format_ok(cae)
-            vig_ok = (vto_date is not None and vto_date >= today)
-
-            estado = []
-            estado.append("CAE encontrado" if cae else "CAE NO encontrado")
-            if fmt_ok:
-                estado.append("Formato OK")
-            elif cae:
-                estado.append("Formato dudoso")
-            if vto_date:
-                estado.append("Vigente" if vig_ok else "Vencido")
+            # Estado local
+            status = []
+            status.append("CAE encontrado" if cae_pdf else "CAE NO encontrado")
+            if basic_format_ok(cae_pdf):
+                status.append("Formato OK")
+            elif cae_pdf:
+                status.append("Formato dudoso")
+            if vto_pdf:
+                status.append("Vigente" if vto_pdf >= today else "Vencido")
             else:
-                estado.append("Vto no detectado")
+                status.append("Vto no detectado")
 
-            # ===============================
-            # Validación AFIP REAL (WSAA+WSCDC)
-            # ===============================
-            # Para constatar real, WSCDC requiere más campos.
-            # Si faltan, devolvemos DATOS_INSUFICIENTES y listo.
-            needed_ok = all([
-                cae,
-                pto_vta,
-                cbte_nro,
-                fecha_cbte,
-                imp_total is not None,
-            ])
+            # Validación AFIP real (WSFE)
+            if not (cbte_tipo and pto_vta is not None and cbte_nro is not None):
+                out_rows.append({
+                    "Archivo": f.filename,
+                    "CAE": cae_pdf or "",
+                    "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                    "Estado": " | ".join(status),
+                    "CbteTipo": cbte_tipo_raw or "",
+                    "PtoVta": pto_vta_raw or "",
+                    "CbteNro": cbte_nro_raw or "",
+                    "AFIP": "DATOS_INSUFICIENTES",
+                    "Detalle AFIP": "Faltan CbteTipo / PtoVta / CbteNro para consultar en WSFE. Mejorar extracción del PDF.",
+                })
+                continue
 
-            if not needed_ok:
-                afip_status = "DATOS_INSUFICIENTES"
-                afip_detail = "Para validar contra AFIP faltan datos del comprobante (pto vta / nro / fecha / total). Mejorar extracción."
-            else:
-                # Aquí es donde va tu integración real:
-                # token, sign = wsaa_login(service="wscdc")
-                # ok, detail = wscdc_constatar(token, sign, AFIP_CUIT, datos...)
-                #
-                # Por ahora, dejamos el plumbing listo y devolvemos PENDIENTE.
-                afip_status = "PENDIENTE"
-                afip_detail = "Integración WSAA+WSCDC lista para conectar (faltan llamadas SOAP)."
+            try:
+                res = wsfe_comp_consultar(cbte_tipo=cbte_tipo, pto_vta=pto_vta, cbte_nro=cbte_nro)
+                cae_afip = res.get("cae")
+                vto_afip = res.get("cae_vto")  # yyyymmdd normalmente
 
-            out_rows.append({
-                "Archivo": f.filename,
-                "CAE": cae or "",
-                "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
-                "Estado": " | ".join(estado),
+                if not cae_afip:
+                    # puede ser no encontrado o error, revisamos errors
+                    errs = res.get("errors") or []
+                    if errs:
+                        out_rows.append({
+                            "Archivo": f.filename,
+                            "CAE": cae_pdf or "",
+                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Estado": " | ".join(status),
+                            "CbteTipo": cbte_tipo,
+                            "PtoVta": pto_vta,
+                            "CbteNro": cbte_nro,
+                            "AFIP": "ERROR_AFIP",
+                            "Detalle AFIP": f"WSFE Errors: {errs[:2]}",
+                        })
+                    else:
+                        out_rows.append({
+                            "Archivo": f.filename,
+                            "CAE": cae_pdf or "",
+                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Estado": " | ".join(status),
+                            "CbteTipo": cbte_tipo,
+                            "PtoVta": pto_vta,
+                            "CbteNro": cbte_nro,
+                            "AFIP": "NO_CONSTA",
+                            "Detalle AFIP": "AFIP no devolvió CAE para ese comprobante (no existe o no accesible).",
+                        })
+                else:
+                    # Comparación CAE PDF vs AFIP
+                    if cae_pdf and cae_pdf.strip() == cae_afip.strip():
+                        out_rows.append({
+                            "Archivo": f.filename,
+                            "CAE": cae_pdf,
+                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Estado": " | ".join(status),
+                            "CbteTipo": cbte_tipo,
+                            "PtoVta": pto_vta,
+                            "CbteNro": cbte_nro,
+                            "AFIP": "OK",
+                            "Detalle AFIP": f"AFIP OK. CAE coincide. Vto AFIP: {vto_afip or ''}",
+                        })
+                    else:
+                        out_rows.append({
+                            "Archivo": f.filename,
+                            "CAE": cae_pdf or "",
+                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Estado": " | ".join(status),
+                            "CbteTipo": cbte_tipo,
+                            "PtoVta": pto_vta,
+                            "CbteNro": cbte_nro,
+                            "AFIP": "NO_COINCIDE",
+                            "Detalle AFIP": f"AFIP devolvió CAE={cae_afip} (no coincide con PDF). Vto AFIP: {vto_afip or ''}",
+                        })
 
-                # Campos extra (útiles para WSCDC)
-                "PtoVta": pto_vta or "",
-                "CbteNro": cbte_nro or "",
-                "FechaCbte": fecha_cbte.strftime("%d/%m/%Y") if fecha_cbte else "",
-                "CUIT_en_PDF": cuit_en_pdf or "",
-                "ImpTotal": imp_total if imp_total is not None else "",
-
-                "AFIP": afip_status,
-                "Detalle AFIP": afip_detail,
-            })
+            except Exception as e:
+                out_rows.append({
+                    "Archivo": f.filename,
+                    "CAE": cae_pdf or "",
+                    "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                    "Estado": " | ".join(status),
+                    "CbteTipo": cbte_tipo,
+                    "PtoVta": pto_vta,
+                    "CbteNro": cbte_nro,
+                    "AFIP": "ERROR_AFIP",
+                    "Detalle AFIP": str(e)[:300],
+                })
 
         except Exception as e:
             out_rows.append({
-                "Archivo": getattr(f, "filename", "archivo"),
+                "Archivo": f.filename,
                 "CAE": "",
                 "Vto CAE": "",
                 "Estado": f"Error procesando PDF: {e}",
+                "CbteTipo": "",
                 "PtoVta": "",
                 "CbteNro": "",
-                "FechaCbte": "",
-                "CUIT_en_PDF": "",
-                "ImpTotal": "",
                 "AFIP": "ERROR",
-                "Detalle AFIP": str(e),
+                "Detalle AFIP": str(e)[:300],
             })
 
     return {"rows": out_rows}
