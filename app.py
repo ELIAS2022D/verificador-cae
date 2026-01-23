@@ -155,7 +155,6 @@ with st.sidebar:
 
 # HERO + STOP si no está logueado
 if not st.session_state.auth["logged"]:
-    show_hero_gif()
     st.info("Iniciá sesión para habilitar carga y validación.")
     st.stop()
 
