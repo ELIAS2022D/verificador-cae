@@ -3,8 +3,9 @@ import io
 import re
 import base64
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import xml.etree.ElementTree as ET
 
 import pdfplumber
@@ -15,10 +16,10 @@ from pydantic import BaseModel
 # ============================================================
 # FASTAPI
 # ============================================================
-app = FastAPI(title="Verificador CAE Backend", version="1.0.0")
+app = FastAPI(title="Verificador CAE Backend", version="2.0.0")
 
 # ============================================================
-# AUTH (LOGIN DE TU SISTEMA)
+# AUTH (LOGIN DE TU SISTEMA) - sólo para usuarios de tu app
 # ============================================================
 MAXI_CUIT = os.getenv("MAXI_CUIT", "")
 MAXI_PASSWORD = os.getenv("MAXI_PASSWORD", "")
@@ -34,7 +35,6 @@ def check_api_key(x_api_key: str):
         raise HTTPException(status_code=401, detail="API key inválida")
 
 def check_bearer(authorization: str):
-    # Producción real: JWT con exp. Hoy: token fijo por env.
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Falta Authorization Bearer token")
     token = authorization.split(" ", 1)[1].strip()
@@ -53,7 +53,7 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
     return {"access_token": DEMO_ACCESS_TOKEN}
 
 # ============================================================
-# PDF EXTRACTION
+# PDF EXTRACTION (mejorada)
 # ============================================================
 CAE_PATTERNS = [
     re.compile(r"\bCAE\b\D{0,30}(\d{14})\b", re.IGNORECASE),
@@ -63,54 +63,45 @@ CAE_PATTERNS = [
 ]
 
 VTO_PATTERNS = [
-    re.compile(
-        r"(?:Fecha\s+de\s+)?(?:Vto\.?\s*de\s*CAE|Vto\.?\s*CAE|Vencimiento\s*CAE|CAE\s*Vto\.?)\D{0,30}(\d{2}[/-]\d{2}[/-]\d{4})",
-        re.IGNORECASE
-    ),
-    re.compile(
-        r"(?:Fecha\s+de\s+)?(?:Vto\.?\s*de\s*CAE|Vto\.?\s*CAE|Vencimiento\s*CAE|CAE\s*Vto\.?)\D{0,30}(\d{4}[/-]\d{2}[/-]\d{2})",
-        re.IGNORECASE
-    ),
+    re.compile(r"(?:Vto\.?\s*(?:de\s*)?CAE|Vencimiento\s*CAE|CAE\s*Vto\.?)\D{0,30}(\d{2}[/-]\d{2}[/-]\d{4})", re.IGNORECASE),
+    re.compile(r"(?:Vto\.?\s*(?:de\s*)?CAE|Vencimiento\s*CAE|CAE\s*Vto\.?)\D{0,30}(\d{4}[/-]\d{2}[/-]\d{2})", re.IGNORECASE),
 ]
 
-# “COD. 01” => tipo comprobante
+# Tipo comprobante: en tus PDFs aparece "COD. 01"
 CBTETIPO_PATTERNS = [
     re.compile(r"\bCOD\.?\s*(\d{1,3})\b", re.IGNORECASE),
     re.compile(r"\bC[oó]digo\s*(\d{1,3})\b", re.IGNORECASE),
 ]
 
-# Punto de venta / Comprobante nro
+# Punto de venta / Nro: "Punto de Venta: 00001" "Comp. Nro: 00000061"
 PTOVTA_PATTERNS = [
     re.compile(r"\bPunto\s+de\s+Venta:\s*(\d{1,5})\b", re.IGNORECASE),
     re.compile(r"\bPto\.?\s*Vta\.?:?\s*(\d{1,5})\b", re.IGNORECASE),
-    # fallback: 00001-00000061
+    # fallback 00001-00000061
     re.compile(r"\b(\d{4,5})\s*[-/]\s*(\d{6,10})\b"),
 ]
-
 CBTENRO_PATTERNS = [
     re.compile(r"\bComp\.?\s*Nro:?\s*(\d{1,12})\b", re.IGNORECASE),
     re.compile(r"\bComprobante\s*N[º°o]?:?\s*(\d{1,12})\b", re.IGNORECASE),
-    # fallback: 00001-00000061
+    # fallback 00001-00000061
     re.compile(r"\b(\d{4,5})\s*[-/]\s*(\d{6,10})\b"),
 ]
 
-# Fecha de emisión (CbteFch para WSCDC)
+# Fecha de emisión
 CBTEFCH_PATTERNS = [
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:\s*(\d{2}[/-]\d{2}[/-]\d{4})\b", re.IGNORECASE),
-    re.compile(r"\bFec\.?\s*Emisi[oó]n:\s*(\d{2}[/-]\d{2}[/-]\d{4})\b", re.IGNORECASE),
+    re.compile(r"\bEmisi[oó]n:\s*(\d{2}[/-]\d{2}[/-]\d{4})\b", re.IGNORECASE),
 ]
 
-# Total (ImpTotal)
+# Total (muy variable según formato). Ajustalo si tu PDF usa otra etiqueta.
 IMPTOTAL_PATTERNS = [
     re.compile(r"\bImporte\s+Total:?\s*\$?\s*([0-9\.\,]+)\b", re.IGNORECASE),
-    re.compile(r"\bTOTAL:?\s*\$?\s*([0-9\.\,]+)\b", re.IGNORECASE),
+    re.compile(r"\bTotal:?\s*\$?\s*([0-9\.\,]+)\b", re.IGNORECASE),
+    re.compile(r"\bIMPORTE\s+TOTAL:?\s*\$?\s*([0-9\.\,]+)\b", re.IGNORECASE),
 ]
 
-# CUITs (emisor / receptor)
-CUIT_PATTERNS = [
-    re.compile(r"\bCUIT\b\D{0,10}(\d{2}-?\d{8}-?\d)\b", re.IGNORECASE),
-    re.compile(r"\bCUIT\b\D{0,10}(\d{11})\b", re.IGNORECASE),
-]
+# CUITs: se usa para intentar sacar DocNroReceptor (si aparece en el PDF)
+CUIT_ANY = re.compile(r"\b(\d{2}-?\d{7,8}-?\d)\b")
 
 def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -118,6 +109,20 @@ def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
         for page in pdf.pages[:max_pages]:
             texts.append(page.extract_text() or "")
         return "\n".join(texts)
+
+def parse_date_any(date_str: Optional[str]) -> Optional[datetime]:
+    if not date_str:
+        return None
+    s = date_str.strip()
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            pass
+    return None
+
+def date_to_yyyymmdd(dt: datetime) -> str:
+    return dt.strftime("%Y%m%d")
 
 def find_first(patterns, text: str) -> Optional[str]:
     for pat in patterns:
@@ -130,7 +135,7 @@ def find_ptovta(text: str) -> Optional[str]:
     for pat in PTOVTA_PATTERNS:
         m = pat.search(text)
         if m:
-            if m.lastindex == 2:  # caso 00001-00000061
+            if m.lastindex == 2:  # 00001-00000061
                 return m.group(1)
             return m.group(1)
     return None
@@ -139,94 +144,55 @@ def find_cbtenro(text: str) -> Optional[str]:
     for pat in CBTENRO_PATTERNS:
         m = pat.search(text)
         if m:
-            if m.lastindex == 2:  # caso 00001-00000061
+            if m.lastindex == 2:  # 00001-00000061
                 return m.group(2)
             return m.group(1)
     return None
 
-def parse_date_any(date_str: Optional[str]):
-    if not date_str:
-        return None
-    s = date_str.strip()
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            pass
-    return None
-
-def to_yyyymmdd(d) -> Optional[str]:
-    if not d:
-        return None
-    return d.strftime("%Y%m%d")
-
-def basic_format_ok(cae: Optional[str]) -> bool:
-    return bool(cae and re.fullmatch(r"\d{14}", cae))
-
 def parse_money_to_float(s: Optional[str]) -> Optional[float]:
     if not s:
         return None
-    s = s.strip()
-    # Ej AR: 1.234,56  -> 1234.56
-    s = s.replace(".", "").replace(",", ".")
+    # 1.234,56 -> 1234.56
+    s = s.strip().replace(".", "").replace(",", ".")
     try:
         return float(s)
     except ValueError:
         return None
 
-def normalize_cuit(s: str) -> str:
-    return re.sub(r"\D", "", s or "")
+def find_doc_receptor_cuit(text: str, cuit_emisor: str) -> Optional[str]:
+    # capturamos CUITs y elegimos uno distinto al emisor (si aparece)
+    found = CUIT_ANY.findall(text)
+    norm_found = []
+    for x in found:
+        x2 = x.replace("-", "").strip()
+        if len(x2) >= 10:
+            norm_found.append(x2)
+    norm_found = list(dict.fromkeys(norm_found))  # unique preserving order
 
-def extract_cuits(text: str) -> List[str]:
-    found = []
-    for pat in CUIT_PATTERNS:
-        for m in pat.finditer(text):
-            c = normalize_cuit(m.group(1))
-            if len(c) == 11 and c not in found:
-                found.append(c)
-    return found
-
-def guess_doc_tipo_y_nro(doc: str) -> (Optional[int], Optional[int]):
-    """
-    Regla simple:
-    - 11 dígitos => CUIT => DocTipo 80
-    - 8 dígitos => DNI  => DocTipo 96
-    """
-    if not doc:
-        return None, None
-    docn = re.sub(r"\D", "", doc)
-    if len(docn) == 11:
-        return 80, int(docn)
-    if len(docn) == 8:
-        return 96, int(docn)
-    return None, None
+    em = cuit_emisor.replace("-", "").strip()
+    for c in norm_found:
+        if c != em:
+            return c
+    return None
 
 # ============================================================
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
-AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()            # CUIT autenticado (tu CUIT)
+AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()  # tu CUIT (emisor / firmante)
+
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
 AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
-
-# Si querés “no romper” en prod cuando AFIP está caído o todavía no autorizaste todo:
-FAIL_WSAA = os.getenv("FAIL_WSAA", "0").strip() == "1"
-
-# OpenSSL (por si en Render no es "openssl" directo)
-OPENSSL_BIN = os.getenv("OPENSSL_BIN", "openssl").strip()
 
 WSAA_URLS = {
     "prod": "https://wsaa.afip.gov.ar/ws/services/LoginCms",
     "homo": "https://wsaahomo.afip.gov.ar/ws/services/LoginCms",
 }
 
-# WSCDC (v2) — ARCA/AFIP (prod/homo)
-# Si necesitás, podés override por env: WSCDC_URL
 WSCDC_URLS = {
-    "prod": "https://serviciosjava2.afip.gob.ar/wscdc/service.asmx",
-    "homo": "https://wswhomo.afip.gov.ar/wscdc/service.asmx",
+    "prod": "https://servicios1.afip.gov.ar/WSCDC/service.asmx",
+    "homo": "https://wswhomo.afip.gov.ar/WSCDC/service.asmx",
 }
-WSCDC_URL_OVERRIDE = os.getenv("WSCDC_URL", "").strip()
 
 def require_afip_env():
     if AFIP_ENV not in ("prod", "homo"):
@@ -239,15 +205,16 @@ def require_afip_env():
 def b64_to_bytes(s: str) -> bytes:
     return base64.b64decode(s.encode("utf-8"))
 
-# Cache simple del TA (token+sign) en memoria del proceso
-_TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None, "service": None}
+# Cache simple del TA en memoria del proceso
+_TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
 
 def build_tra(service: str) -> str:
+    # Margen por clock skew
     now = datetime.now(timezone.utc)
     gen = now - timedelta(minutes=5)
     exp = now + timedelta(hours=8)
 
-    tra = f"""<?xml version="1.0" encoding="UTF-8"?>
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <loginTicketRequest version="1.0">
   <header>
     <uniqueId>{int(now.timestamp())}</uniqueId>
@@ -256,56 +223,68 @@ def build_tra(service: str) -> str:
   </header>
   <service>{service}</service>
 </loginTicketRequest>"""
-    return tra
 
-def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> bytes:
+def _ensure_cert_pem(tmpdir: str, cert_bytes: bytes) -> str:
     """
-    Firma CMS (PKCS#7) usando openssl (smime -sign).
+    Acepta cert en PEM o DER.
+    Si es DER, lo convierte a PEM con openssl x509.
     """
-    import tempfile
+    cert_in = os.path.join(tmpdir, "cert_in.crt")
+    cert_pem = os.path.join(tmpdir, "cert.pem")
+    with open(cert_in, "wb") as f:
+        f.write(cert_bytes)
 
+    if b"BEGIN CERTIFICATE" in cert_bytes:
+        # ya es PEM
+        with open(cert_pem, "wb") as f:
+            f.write(cert_bytes)
+        return cert_pem
+
+    # DER -> PEM
+    cmd = ["openssl", "x509", "-inform", "DER", "-in", cert_in, "-out", cert_pem, "-outform", "PEM"]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return cert_pem
+
+def sign_tra_with_openssl(tra_xml: str, cert_bytes: bytes, key_bytes: bytes) -> bytes:
+    """
+    Firma CMS (PKCS#7) con openssl smime.
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        cert_path = os.path.join(tmp, "cert.pem")
         key_path = os.path.join(tmp, "private.key")
         tra_path = os.path.join(tmp, "tra.xml")
         out_path = os.path.join(tmp, "tra.cms")
 
-        with open(cert_path, "wb") as f:
-            f.write(cert_pem)
+        # key (PEM)
         with open(key_path, "wb") as f:
-            f.write(key_pem)
+            f.write(key_bytes)
+
+        # cert PEM (si viene DER lo convertimos)
+        cert_path = _ensure_cert_pem(tmp, cert_bytes)
+
         with open(tra_path, "wb") as f:
             f.write(tra_xml.encode("utf-8"))
 
         cmd = [
-            OPENSSL_BIN, "smime", "-sign",
+            "openssl", "smime", "-sign",
             "-signer", cert_path,
             "-inkey", key_path,
             "-in", tra_path,
             "-out", out_path,
             "-outform", "DER",
             "-nodetach",
-            "-binary"
+            "-binary",
         ]
-
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-        except FileNotFoundError:
-            raise RuntimeError(f"No se encontró OpenSSL ({OPENSSL_BIN}). Seteá OPENSSL_BIN o instalalo en el runtime.")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"OpenSSL error: {e.stderr.decode('utf-8', 'ignore')}")
+        subprocess.run(cmd, check=True, capture_output=True)
 
         with open(out_path, "rb") as f:
             return f.read()
 
 def wsaa_login_get_ta(service: str) -> Dict[str, str]:
     """
-    Devuelve token+sign para el service pedido, usando cache si no expiró.
+    Devuelve token+sign para el service solicitado (wscdc), usando cache.
     """
     now = datetime.now(timezone.utc)
-    if (
-        _TA_CACHE["token"] and _TA_CACHE["sign"] and _TA_CACHE["exp_utc"] and _TA_CACHE["service"] == service
-    ):
+    if _TA_CACHE["token"] and _TA_CACHE["sign"] and _TA_CACHE["exp_utc"]:
         if now + timedelta(minutes=2) < _TA_CACHE["exp_utc"]:
             return {"token": _TA_CACHE["token"], "sign": _TA_CACHE["sign"]}
 
@@ -326,21 +305,16 @@ def wsaa_login_get_ta(service: str) -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
+    # CLAVE: mandar SOAPAction para evitar Client.NoSOAPAction
     headers = {
-    "Content-Type": "text/xml; charset=utf-8",
-    "SOAPAction": "loginCms",      # clave para Axis (NoSOAPAction)
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "loginCms",
     }
 
-    r = requests.post(
-        wsaa_url,
-        data=soap.encode("utf-8"),
-        headers=headers,
-        timeout=40
-    )
+    r = requests.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
     if r.status_code != 200:
-        raise RuntimeError(f"WSAA HTTP {r.status_code}: {r.text[:800]}")
+        raise RuntimeError(f"WSAA HTTP {r.status_code}: {r.text[:600]}")
 
-    # Parse: loginCmsReturn contiene XML TA
     root = ET.fromstring(r.text)
     ta_xml = None
     for el in root.iter():
@@ -362,94 +336,121 @@ def wsaa_login_get_ta(service: str) -> Dict[str, str]:
     _TA_CACHE["token"] = token
     _TA_CACHE["sign"] = sign
     _TA_CACHE["exp_utc"] = exp_utc
-    _TA_CACHE["service"] = service
 
     return {"token": token, "sign": sign}
 
-def wscdc_constatar(req: Dict[str, Any]) -> Dict[str, Any]:
+def wsaa_safe_get_ta(service: str) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
     """
-    WSCDC: ComprobanteConstatar
-    Devuelve dict con:
-      - resultado (S/N)
-      - observaciones/errores
-      - raw xml
+    No revienta el flujo: si falla WSAA devuelve error string.
     """
-    # Service name para WSAA (WSCDC) suele ser "wscdc"
-    # (si tu autorización está hecha sobre ese servicio)
-    ta = wsaa_login_get_ta(service="wscdc")
+    try:
+        return wsaa_login_get_ta(service=service), None
+    except Exception as e:
+        return None, str(e)[:400]
 
-    url = WSCDC_URL_OVERRIDE or WSCDC_URLS[AFIP_ENV]
+def wscdc_constatar(
+    cuit_emisor: int,
+    pto_vta: int,
+    cbte_tipo: int,
+    cbte_nro: int,
+    cbte_fch_yyyymmdd: str,
+    imp_total: float,
+    cae: str,
+    doc_tipo_receptor: str = "80",
+    doc_nro_receptor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    WSCDC ComprobanteConstatar (AFIP).
+    SOAPAction y namespace según documentación del .asmx. :contentReference[oaicite:2]{index=2}
+    """
+    ta, err = wsaa_safe_get_ta(service="wscdc")
+    if err or not ta:
+        raise RuntimeError(f"FAIL_WSAA: {err}")
 
-    # Request fields (WSCDC)
-    # CbteModo: "CAE"
-    # CuitEmisor: CUIT del emisor del comprobante (del PDF)
-    # PtoVta, CbteTipo, CbteNro, CbteFch (YYYYMMDD), ImpTotal, CodAutorizacion (CAE)
-    # DocTipoReceptor y DocNroReceptor: si no los tenemos, mandamos 0/0 (seguro no siempre).
-    # Preferimos exigirlos si faltan (para evitar consultas inválidas).
+    url = WSCDC_URLS[AFIP_ENV]
+    auth_cuit = int(AFIP_CUIT.replace("-", ""))
+
+    # Si no encontramos doc receptor, mandamos vacío (algunos comprobantes no lo requieren estrictamente
+    # dependiendo modo). Igual, si AFIP lo exige, lo verás en Errors.
+    doc_nro = (doc_nro_receptor or "").strip()
+
     soap = f"""<?xml version="1.0" encoding="utf-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <soapenv:Body>
-    <ComprobanteConstatar xmlns="http://ar.gov.afip.dif.wscdc/">
-      <AuthRequest>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+               xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <ComprobanteConstatar xmlns="http://servicios1.afip.gob.ar/wscdc/">
+      <Auth>
         <Token>{ta["token"]}</Token>
         <Sign>{ta["sign"]}</Sign>
-        <Cuit>{AFIP_CUIT}</Cuit>
-      </AuthRequest>
+        <Cuit>{auth_cuit}</Cuit>
+      </Auth>
       <CmpReq>
-        <CbteModo>{req["CbteModo"]}</CbteModo>
-        <CuitEmisor>{req["CuitEmisor"]}</CuitEmisor>
-        <PtoVta>{req["PtoVta"]}</PtoVta>
-        <CbteTipo>{req["CbteTipo"]}</CbteTipo>
-        <CbteNro>{req["CbteNro"]}</CbteNro>
-        <CbteFch>{req["CbteFch"]}</CbteFch>
-        <ImpTotal>{req["ImpTotal"]}</ImpTotal>
-        <CodAutorizacion>{req["CodAutorizacion"]}</CodAutorizacion>
-        <DocTipoReceptor>{req["DocTipoReceptor"]}</DocTipoReceptor>
-        <DocNroReceptor>{req["DocNroReceptor"]}</DocNroReceptor>
+        <CbteModo>CAE</CbteModo>
+        <CuitEmisor>{cuit_emisor}</CuitEmisor>
+        <PtoVta>{pto_vta}</PtoVta>
+        <CbteTipo>{cbte_tipo}</CbteTipo>
+        <CbteNro>{cbte_nro}</CbteNro>
+        <CbteFch>{cbte_fch_yyyymmdd}</CbteFch>
+        <ImpTotal>{imp_total}</ImpTotal>
+        <CodAutorizacion>{cae}</CodAutorizacion>
+        <DocTipoReceptor>{doc_tipo_receptor}</DocTipoReceptor>
+        <DocNroReceptor>{doc_nro}</DocNroReceptor>
       </CmpReq>
     </ComprobanteConstatar>
-  </soapenv:Body>
-</soapenv:Envelope>"""
+  </soap:Body>
+</soap:Envelope>"""
 
-    r = requests.post(
-        url,
-        data=soap.encode("utf-8"),
-        headers={"Content-Type": "text/xml; charset=utf-8"},
-        timeout=60
-    )
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
+    }
+
+    r = requests.post(url, data=soap.encode("utf-8"), headers=headers, timeout=60)
     if r.status_code != 200:
-        raise RuntimeError(f"WSCDC HTTP {r.status_code}: {r.text[:900]}")
+        raise RuntimeError(f"WSCDC HTTP {r.status_code}: {r.text[:600]}")
 
-    # Parse básico: buscamos Resultado y/o errores/observaciones
     root = ET.fromstring(r.text)
 
-    # Ej tags: Resultado, Obs/Observaciones, Err/Errores (depende respuesta)
+    # Resultado/Observaciones/Errors (parsing tolerante)
     resultado = None
     for el in root.iter():
-        if el.tag.lower().endswith("resultado"):
-            if el.text and el.text.strip():
-                resultado = el.text.strip()
-                break
+        if el.tag.endswith("Resultado") and el.text:
+            resultado = el.text.strip()
+            break
 
     errors = []
-    for el in root.iter():
-        if el.tag.lower().endswith("err"):
-            code = el.findtext(".//*[local-name()='Code']")
-            msg = el.findtext(".//*[local-name()='Msg']")
+    for err_el in root.iter():
+        if err_el.tag.endswith("Err"):
+            code = None
+            msg = None
+            for c in err_el.iter():
+                if c.tag.endswith("Code") and c.text:
+                    code = c.text.strip()
+                if c.tag.endswith("Msg") and c.text:
+                    msg = c.text.strip()
             if code or msg:
                 errors.append({"code": code, "msg": msg})
 
     obs = []
-    for el in root.iter():
-        if el.tag.lower().endswith("obs"):
-            code = el.findtext(".//*[local-name()='Code']")
-            msg = el.findtext(".//*[local-name()='Msg']")
+    for obs_el in root.iter():
+        if obs_el.tag.endswith("Obs"):
+            code = None
+            msg = None
+            for c in obs_el.iter():
+                if c.tag.endswith("Code") and c.text:
+                    code = c.text.strip()
+                if c.tag.endswith("Msg") and c.text:
+                    msg = c.text.strip()
             if code or msg:
                 obs.append({"code": code, "msg": msg})
 
-    return {"resultado": resultado, "errors": errors, "obs": obs, "raw": r.text}
+    return {
+        "resultado": resultado,
+        "errors": errors,
+        "observaciones": obs,
+        "raw": r.text,
+    }
 
 # ============================================================
 # VERIFY ENDPOINT (PROD)
@@ -467,33 +468,34 @@ async def verify(
     today = datetime.now().date()
     out_rows: List[Dict[str, Any]] = []
 
+    cuit_emisor = int(AFIP_CUIT.replace("-", ""))
+
     for f in files:
         try:
             pdf_bytes = await f.read()
             text = extract_text_pdf(pdf_bytes, max_pages=5)
 
+            # PDF fields
             cae_pdf = find_first(CAE_PATTERNS, text)
+
             vto_raw = find_first(VTO_PATTERNS, text)
-            vto_pdf = parse_date_any(vto_raw)
+            vto_dt = parse_date_any(vto_raw)
+            vto_date = vto_dt.date() if vto_dt else None
 
             cbte_tipo_raw = find_first(CBTETIPO_PATTERNS, text)
             pto_vta_raw = find_ptovta(text)
             cbte_nro_raw = find_cbtenro(text)
 
-            cbte_fch_raw = find_first(CBTEFCH_PATTERNS, text)  # dd/mm/yyyy
-            cbte_fch_date = parse_date_any(cbte_fch_raw)
-            cbte_fch = to_yyyymmdd(cbte_fch_date)
+            fch_raw = find_first(CBTEFCH_PATTERNS, text)
+            fch_dt = parse_date_any(fch_raw) if fch_raw else None
+            cbte_fch = date_to_yyyymmdd(fch_dt) if fch_dt else None
 
-            imp_total_raw = find_first(IMPTOTAL_PATTERNS, text)
-            imp_total = parse_money_to_float(imp_total_raw)
+            imp_raw = find_first(IMPTOTAL_PATTERNS, text)
+            imp_total = parse_money_to_float(imp_raw)
 
-            cuits = extract_cuits(text)
-            cuit_emisor = cuits[0] if len(cuits) >= 1 else None
-            cuit_receptor = cuits[1] if len(cuits) >= 2 else None  # heurística simple
+            doc_receptor = find_doc_receptor_cuit(text, cuit_emisor=str(cuit_emisor))
 
-            doc_tipo_receptor, doc_nro_receptor = guess_doc_tipo_y_nro(cuit_receptor or "")
-
-            # Normalizaciones numéricas
+            # Normalizaciones
             cbte_tipo = int(cbte_tipo_raw) if cbte_tipo_raw else None
             pto_vta = int(pto_vta_raw) if pto_vta_raw else None
             cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
@@ -501,19 +503,20 @@ async def verify(
             # Estado local
             status = []
             status.append("CAE encontrado" if cae_pdf else "CAE NO encontrado")
-            if basic_format_ok(cae_pdf):
+            if cae_pdf and re.fullmatch(r"\d{14}", cae_pdf):
                 status.append("Formato OK")
             elif cae_pdf:
                 status.append("Formato dudoso")
-            if vto_pdf:
-                status.append("Vigente" if vto_pdf >= today else "Vencido")
+            if vto_date:
+                status.append("Vigente" if vto_date >= today else "Vencido")
             else:
                 status.append("Vto no detectado")
 
-            # ===== Validación AFIP real (WSCDC) =====
-            # WSCDC necesita: CbteTipo / PtoVta / CbteNro / CbteFch / ImpTotal / CodAutorizacion / CuitEmisor / DocTipo+DocNro receptor
+            # Validación AFIP (WSCDC requiere CbteFch + ImpTotal + CAE + ids)
             missing = []
-            if not cbte_tipo:
+            if not cae_pdf:
+                missing.append("CAE")
+            if cbte_tipo is None:
                 missing.append("CbteTipo")
             if pto_vta is None:
                 missing.append("PtoVta")
@@ -523,139 +526,99 @@ async def verify(
                 missing.append("CbteFch")
             if imp_total is None:
                 missing.append("ImpTotal")
-            if not cae_pdf:
-                missing.append("CodAutorizacion(CAE)")
-            if not cuit_emisor:
-                missing.append("CuitEmisor")
-            if not (doc_tipo_receptor and doc_nro_receptor is not None):
-                missing.append("DocTipoReceptor/DocNroReceptor")
 
             if missing:
                 out_rows.append({
                     "Archivo": f.filename,
                     "CAE": cae_pdf or "",
-                    "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                    "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
                     "Estado": " | ".join(status),
                     "CbteTipo": cbte_tipo_raw or "",
                     "PtoVta": pto_vta_raw or "",
                     "CbteNro": cbte_nro_raw or "",
-                    "CbteFch": cbte_fch_raw or "",
-                    "ImpTotal": imp_total_raw or "",
-                    "CuitEmisor": cuit_emisor or "",
-                    "DocTipoReceptor": str(doc_tipo_receptor or ""),
-                    "DocNroReceptor": str(doc_nro_receptor or ""),
+                    "CbteFch": fch_raw or "",
+                    "ImpTotal": imp_raw or "",
                     "AFIP": "DATOS_INSUFICIENTES",
                     "Detalle AFIP": f"Faltan campos para WSCDC: {', '.join(missing)}. Mejorar extracción del PDF.",
                 })
                 continue
 
-            if FAIL_WSAA:
-                out_rows.append({
-                    "Archivo": f.filename,
-                    "CAE": cae_pdf or "",
-                    "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
-                    "Estado": " | ".join(status),
-                    "CbteTipo": cbte_tipo,
-                    "PtoVta": pto_vta,
-                    "CbteNro": cbte_nro,
-                    "CbteFch": cbte_fch,
-                    "ImpTotal": imp_total,
-                    "CuitEmisor": cuit_emisor,
-                    "DocTipoReceptor": doc_tipo_receptor,
-                    "DocNroReceptor": doc_nro_receptor,
-                    "AFIP": "PENDIENTE",
-                    "Detalle AFIP": f"FAIL_WSAA=1. WSCDC deshabilitado. Emisor={cuit_emisor}. ENV={AFIP_ENV}",
-                })
-                continue
-
-            req = {
-                "CbteModo": "CAE",
-                "CuitEmisor": cuit_emisor,
-                "PtoVta": pto_vta,
-                "CbteTipo": cbte_tipo,
-                "CbteNro": cbte_nro,
-                "CbteFch": cbte_fch,                  # YYYYMMDD
-                "ImpTotal": f"{imp_total:.2f}",        # string numérica
-                "CodAutorizacion": cae_pdf,            # CAE
-                "DocTipoReceptor": doc_tipo_receptor,
-                "DocNroReceptor": doc_nro_receptor,
-            }
-
+            # Llamada real WSCDC
             try:
-                res = wscdc_constatar(req=req)
-                resultado = res.get("resultado")
+                res = wscdc_constatar(
+                    cuit_emisor=cuit_emisor,
+                    pto_vta=pto_vta,
+                    cbte_tipo=cbte_tipo,
+                    cbte_nro=cbte_nro,
+                    cbte_fch_yyyymmdd=cbte_fch,
+                    imp_total=imp_total,
+                    cae=cae_pdf,
+                    doc_tipo_receptor="80",
+                    doc_nro_receptor=doc_receptor,
+                )
+
+                resultado = (res.get("resultado") or "").upper()
                 errs = res.get("errors") or []
-                obs = res.get("obs") or []
+                obs = res.get("observaciones") or []
 
                 if errs:
                     out_rows.append({
                         "Archivo": f.filename,
                         "CAE": cae_pdf,
-                        "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                        "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
                         "Estado": " | ".join(status),
                         "CbteTipo": cbte_tipo,
                         "PtoVta": pto_vta,
                         "CbteNro": cbte_nro,
                         "CbteFch": cbte_fch,
                         "ImpTotal": imp_total,
-                        "CuitEmisor": cuit_emisor,
-                        "DocTipoReceptor": doc_tipo_receptor,
-                        "DocNroReceptor": doc_nro_receptor,
                         "AFIP": "ERROR_AFIP",
                         "Detalle AFIP": f"WSCDC Errors: {errs[:2]}",
                     })
                 else:
-                    if (resultado or "").upper() == "S":
+                    # Resultado típico: "A" (aceptado) / "R" (rechazado) (depende servicio)
+                    if resultado in ("A", "APROBADO", "OK"):
                         out_rows.append({
                             "Archivo": f.filename,
                             "CAE": cae_pdf,
-                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
                             "Estado": " | ".join(status),
                             "CbteTipo": cbte_tipo,
                             "PtoVta": pto_vta,
                             "CbteNro": cbte_nro,
                             "CbteFch": cbte_fch,
                             "ImpTotal": imp_total,
-                            "CuitEmisor": cuit_emisor,
-                            "DocTipoReceptor": doc_tipo_receptor,
-                            "DocNroReceptor": doc_nro_receptor,
                             "AFIP": "OK",
-                            "Detalle AFIP": f"WSCDC OK (Resultado=S). Obs: {obs[:1] if obs else '—'}",
+                            "Detalle AFIP": f"WSCDC OK. Resultado={resultado}. Obs={obs[:2]}",
                         })
                     else:
                         out_rows.append({
                             "Archivo": f.filename,
                             "CAE": cae_pdf,
-                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
                             "Estado": " | ".join(status),
                             "CbteTipo": cbte_tipo,
                             "PtoVta": pto_vta,
                             "CbteNro": cbte_nro,
                             "CbteFch": cbte_fch,
                             "ImpTotal": imp_total,
-                            "CuitEmisor": cuit_emisor,
-                            "DocTipoReceptor": doc_tipo_receptor,
-                            "DocNroReceptor": doc_nro_receptor,
                             "AFIP": "NO_CONSTA",
-                            "Detalle AFIP": f"WSCDC Resultado != S. Obs: {obs[:2] if obs else '—'}",
+                            "Detalle AFIP": f"WSCDC Resultado={resultado or 'N/D'}. Obs={obs[:2]}",
                         })
 
             except Exception as e:
                 out_rows.append({
                     "Archivo": f.filename,
                     "CAE": cae_pdf or "",
-                    "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                    "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
                     "Estado": " | ".join(status),
-                    "CbteTipo": cbte_tipo,
-                    "PtoVta": pto_vta,
-                    "CbteNro": cbte_nro,
+                    "CbteTipo": cbte_tipo or "",
+                    "PtoVta": pto_vta or "",
+                    "CbteNro": cbte_nro or "",
                     "CbteFch": cbte_fch or "",
                     "ImpTotal": imp_total if imp_total is not None else "",
-                    "CuitEmisor": cuit_emisor or "",
-                    "DocTipoReceptor": str(doc_tipo_receptor or ""),
-                    "DocNroReceptor": str(doc_nro_receptor or ""),
                     "AFIP": "ERROR_AFIP",
-                    "Detalle AFIP": str(e)[:350],
+                    "Detalle AFIP": str(e)[:300],
                 })
 
         except Exception as e:
@@ -669,11 +632,8 @@ async def verify(
                 "CbteNro": "",
                 "CbteFch": "",
                 "ImpTotal": "",
-                "CuitEmisor": "",
-                "DocTipoReceptor": "",
-                "DocNroReceptor": "",
                 "AFIP": "ERROR",
-                "Detalle AFIP": str(e)[:350],
+                "Detalle AFIP": str(e)[:300],
             })
 
     return {"rows": out_rows}
