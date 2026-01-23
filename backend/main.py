@@ -179,7 +179,7 @@ WSAA_URLS = {
 
 # WSCDC (según manual; prod usa ARCA) :contentReference[oaicite:1]{index=1}
 WSCDC_URLS = {
-    "prod": "https://servicios1.arca.gob.ar/WSCDC/service.asmx",
+    "prod": "https://servicios1.afip.gov.ar/WSCDC/service.asmx",
     "homo": "https://wswhomo.afip.gob.ar/WSCDC/service.asmx",
 }
 
