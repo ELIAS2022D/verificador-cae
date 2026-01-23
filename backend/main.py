@@ -356,7 +356,10 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
-    headers = {"Content-Type": "text/xml; charset=utf-8"}
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "loginCms",
+    }
 
     # >>> USAR AFIP_SESSION (TLS compatible)
     r = AFIP_SESSION.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
