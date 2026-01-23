@@ -116,6 +116,13 @@ CBTEFCH_PATTERNS = [
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{4}[/-]\d{2}[/-]\d{2})\b", re.IGNORECASE),
 ]
 
+# TOTAL / IMPORTE TOTAL (necesario para WSCDC en muchos casos)
+# Nota: capturamos el número en formato AR: 1.234,56 o 1234,56 o 1234.56
+TOTAL_PATTERNS = [
+    re.compile(r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL)\b\D{0,40}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))", re.IGNORECASE),
+    re.compile(r"\b(?:IMP\.?\s*TOTAL|TOTAL)\b\D{0,40}\$\s*(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))", re.IGNORECASE),
+]
+
 
 def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -175,6 +182,29 @@ def date_to_yyyymmdd(d) -> Optional[str]:
     return d.strftime("%Y%m%d")
 
 
+def normalize_amount_ar_to_float(s: Optional[str]) -> Optional[float]:
+    """
+    Convierte strings tipo '1.234,56' o '1234,56' o '1234.56' a float.
+    - Si hay coma, se asume decimal ',' y miles con '.' o espacios.
+    - Si no hay coma, se intenta decimal '.' si corresponde.
+    """
+    if not s:
+        return None
+    x = s.strip()
+
+    # Limpieza básica
+    x = x.replace(" ", "")
+    # Si tiene coma, usamos coma como decimal y removemos miles con punto.
+    if "," in x:
+        x = x.replace(".", "")
+        x = x.replace(",", ".")
+    # Si no tiene coma, dejamos '.' como decimal si existe.
+    try:
+        return float(x)
+    except ValueError:
+        return None
+
+
 # ============================================================
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
@@ -194,12 +224,21 @@ WSCDC_URLS = {
     "homo": "https://wswhomo.afip.gob.ar/WSCDC/service.asmx",
 }
 
+# WSAA SOAPAction (loginCms) OK
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
+
+# IMPORTANT: WSCDC requiere SOAPAction válido (si no, fault "action parameter").
+# Default corregido al endpoint real (prod) de AFIP.
 WSCDC_SOAP_ACTION = os.getenv(
-    "WSCDC_SOAP_ACTION", "http://ar.gov.afip.dif.wscdc/ComprobanteConstatar"
+    "WSCDC_SOAP_ACTION",
+    "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
 ).strip()
 
-WSCDC_NS = os.getenv("WSCDC_NS", "http://ar.gov.afip.dif.wscdc/").strip()
+# Namespace real del servicio WSCDC (según endpoint de AFIP)
+WSCDC_NS = os.getenv(
+    "WSCDC_NS",
+    "http://servicios1.afip.gob.ar/wscdc/",
+).strip()
 
 
 def require_afip_env():
@@ -396,36 +435,52 @@ def wscdc_comprobante_constatar(
     cbte_nro: int,
     cbte_fch_yyyymmdd: str,
     cae: str,
+    imp_total: float,
+    cuit_emisor: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """
+    WSCDC: ComprobanteConstatar.
+    - Se agrega SOAPAction correcto (si no, da fault "valid action parameter")
+    - Se usa el namespace real del endpoint.
+    - Se incluye ImpTotal y CuitEmisor (muy comúnmente requeridos para modo CAE).
+    """
     ta = wsaa_login_get_ta(service="wscdc")
 
     url = WSCDC_URLS[AFIP_ENV]
     cuit = AFIP_CUIT
+    cuit_emisor = (cuit_emisor or AFIP_CUIT).strip()
 
-    soap = f"""<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                  xmlns:wscdc="{WSCDC_NS}">
-  <soapenv:Header/>
-  <soapenv:Body>
-    <wscdc:ComprobanteConstatar>
-      <wscdc:Auth>
-        <wscdc:Token>{ta["token"]}</wscdc:Token>
-        <wscdc:Sign>{ta["sign"]}</wscdc:Sign>
-        <wscdc:Cuit>{cuit}</wscdc:Cuit>
-      </wscdc:Auth>
-      <wscdc:CmpReq>
-        <wscdc:CbteModo>CAE</wscdc:CbteModo>
-        <wscdc:CbteTipo>{cbte_tipo}</wscdc:CbteTipo>
-        <wscdc:PtoVta>{pto_vta}</wscdc:PtoVta>
-        <wscdc:CbteNro>{cbte_nro}</wscdc:CbteNro>
-        <wscdc:CbteFch>{cbte_fch_yyyymmdd}</wscdc:CbteFch>
-        <wscdc:CodAutorizacion>{cae}</wscdc:CodAutorizacion>
-      </wscdc:CmpReq>
-    </wscdc:ComprobanteConstatar>
-  </soapenv:Body>
-</soapenv:Envelope>"""
+    # Request alineado al ejemplo típico del .asmx (default namespace, sin prefijos en nodos)
+    soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+               xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <ComprobanteConstatar xmlns="{WSCDC_NS}">
+      <Auth>
+        <Token>{ta["token"]}</Token>
+        <Sign>{ta["sign"]}</Sign>
+        <Cuit>{cuit}</Cuit>
+      </Auth>
+      <CmpReq>
+        <CbteModo>CAE</CbteModo>
+        <CuitEmisor>{cuit_emisor}</CuitEmisor>
+        <PtoVta>{pto_vta}</PtoVta>
+        <CbteTipo>{cbte_tipo}</CbteTipo>
+        <CbteNro>{cbte_nro}</CbteNro>
+        <CbteFch>{cbte_fch_yyyymmdd}</CbteFch>
+        <ImpTotal>{imp_total:.2f}</ImpTotal>
+        <CodAutorizacion>{cae}</CodAutorizacion>
+      </CmpReq>
+    </ComprobanteConstatar>
+  </soap:Body>
+</soap:Envelope>"""
 
-    headers = {"Content-Type": "text/xml; charset=utf-8"}
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        # IMPORTANT: comillas para SOAP 1.1 en .asmx (evita "action parameter")
+        "SOAPAction": f"\"{WSCDC_SOAP_ACTION}\"",
+    }
 
     # >>> USAR AFIP_SESSION (TLS compatible)
     r = AFIP_SESSION.post(url, data=soap.encode("utf-8"), headers=headers, timeout=60)
@@ -474,6 +529,9 @@ async def verify(
             cbte_fch_raw = find_first(CBTEFCH_PATTERNS, text)
             cbte_fch = parse_date(cbte_fch_raw)
 
+            total_raw = find_first(TOTAL_PATTERNS, text)
+            imp_total = normalize_amount_ar_to_float(total_raw)
+
             cbte_tipo = int(cbte_tipo_raw) if cbte_tipo_raw else None
             pto_vta = int(pto_vta_raw) if pto_vta_raw else None
             cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
@@ -501,6 +559,9 @@ async def verify(
                 missing.append("CbteFch")
             if not cae_pdf:
                 missing.append("CAE")
+            # Recomendación aplicada: ImpTotal suele ser requerido por WSCDC en modo CAE
+            if imp_total is None:
+                missing.append("ImpTotal")
 
             if missing:
                 out_rows.append({
@@ -512,6 +573,7 @@ async def verify(
                     "PtoVta": pto_vta_raw or "",
                     "CbteNro": cbte_nro_raw or "",
                     "CbteFch": cbte_fch_raw or "",
+                    "ImpTotal": total_raw or "",
                     "AFIP": "DATOS_INSUFICIENTES",
                     "Detalle AFIP": f"Faltan campos para WSCDC: {', '.join(missing)}. Mejorar extracción del PDF.",
                 })
@@ -524,6 +586,8 @@ async def verify(
                     cbte_nro=cbte_nro,
                     cbte_fch_yyyymmdd=cbte_fch_yyyymmdd,
                     cae=str(cae_pdf).strip(),
+                    imp_total=float(imp_total),
+                    cuit_emisor=AFIP_CUIT,  # recomendación aplicada: si emitís y consultás con el mismo CUIT
                 )
 
                 if res.get("resultado"):
@@ -537,6 +601,7 @@ async def verify(
                         "PtoVta": pto_vta,
                         "CbteNro": cbte_nro,
                         "CbteFch": cbte_fch_yyyymmdd,
+                        "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else "",
                         "AFIP": "OK" if afip_ok else "NO_CONSTA",
                         "Detalle AFIP": f"WSCDC Resultado={res['resultado']}",
                     })
@@ -550,6 +615,7 @@ async def verify(
                         "PtoVta": pto_vta,
                         "CbteNro": cbte_nro,
                         "CbteFch": cbte_fch_yyyymmdd,
+                        "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else "",
                         "AFIP": "OK_HTTP",
                         "Detalle AFIP": "WSCDC respondió 200. No se detectó campo 'Resultado' (revisar parse).",
                     })
@@ -564,6 +630,7 @@ async def verify(
                     "PtoVta": pto_vta,
                     "CbteNro": cbte_nro,
                     "CbteFch": cbte_fch_yyyymmdd,
+                    "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else (total_raw or ""),
                     "AFIP": "ERROR_AFIP",
                     "Detalle AFIP": str(e)[:1200],
                 })
@@ -578,6 +645,7 @@ async def verify(
                 "PtoVta": "",
                 "CbteNro": "",
                 "CbteFch": "",
+                "ImpTotal": "",
                 "AFIP": "ERROR",
                 "Detalle AFIP": str(e)[:600],
             })
