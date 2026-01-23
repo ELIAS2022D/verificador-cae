@@ -28,8 +28,9 @@ def show_hero_gif():
     if not gif_path.exists():
         return
 
-    # GIF levemente más chico, mantiene animación y alineación izquierda
-    st.image(str(gif_path), width=400)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image(str(gif_path), width=320)
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
