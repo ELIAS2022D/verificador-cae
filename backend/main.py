@@ -119,11 +119,11 @@ CBTEFCH_PATTERNS = [
 # TOTAL / IMPORTE TOTAL (necesario para WSCDC en muchos casos)
 TOTAL_PATTERNS = [
     re.compile(
-        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|IMPORTE\s+FINAL|TOTAL)\b\D{0,40}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
+        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|IMPORTE\s+FINAL|TOTAL)\b\D{0,60}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|TOTAL)\b\D{0,40}\$\s*(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
+        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|TOTAL)\b\D{0,60}\$\s*(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
         re.IGNORECASE,
     ),
 ]
@@ -135,7 +135,7 @@ FACTURA_TIPO_PATTERNS = [
     re.compile(r"\bC\s+FACTURA\b", re.IGNORECASE),
 ]
 
-# CUITs: en PDFs AFIP suelen aparecer como "CUIT:" y el número puede estar en la misma línea o la siguiente
+# CUITs
 CUIT_AFTER_LABEL_RE = re.compile(r"\bCUIT:\s*([0-9]{11})\b", re.IGNORECASE)
 CUIT_ANY_11_RE = re.compile(r"\b([0-9]{11})\b")
 
@@ -204,13 +204,10 @@ def date_to_yyyymmdd(d) -> Optional[str]:
 def normalize_amount_ar_to_float(s: Optional[str]) -> Optional[float]:
     """
     Convierte strings tipo '1.234,56' o '1234,56' o '1234.56' a float.
-    - Si hay coma, se asume decimal ',' y miles con '.' o espacios.
-    - Si no hay coma, se intenta decimal '.' si corresponde.
     """
     if not s:
         return None
-    x = s.strip()
-    x = x.replace(" ", "")
+    x = s.strip().replace(" ", "")
     if "," in x:
         x = x.replace(".", "")
         x = x.replace(",", ".")
@@ -227,7 +224,6 @@ def detect_factura_letra(text: str) -> Optional[str]:
     for pat in FACTURA_TIPO_PATTERNS:
         m = pat.search(text)
         if m:
-            # el patrón es "A FACTURA", etc.
             return m.group(0).strip()[0].upper()
     return None
 
@@ -235,13 +231,11 @@ def detect_factura_letra(text: str) -> Optional[str]:
 def extract_all_cuits(text: str) -> List[str]:
     """
     Extrae CUITs de 11 dígitos. Priorizamos los que aparecen explícitamente como 'CUIT:'.
-    Si no alcanza, caemos a cualquier número de 11 dígitos.
     """
     cuits = []
     for m in CUIT_AFTER_LABEL_RE.finditer(text):
         cuits.append(m.group(1))
 
-    # Fallback: si por alguna razón no aparecen como 'CUIT:', tomamos cualquier 11 dígitos
     if not cuits:
         for m in CUIT_ANY_11_RE.finditer(text):
             cuits.append(m.group(1))
@@ -256,6 +250,18 @@ def extract_all_cuits(text: str) -> List[str]:
     return out
 
 
+def decide_cuit_emisor(text: str) -> Optional[str]:
+    """
+    Heurística: en PDFs de facturas AFIP, típicamente el primer CUIT que aparece
+    corresponde al EMISOR (encabezado), y luego aparece el CUIT del receptor.
+    Para evitar romper, devolvemos el primero y listo.
+    """
+    cuits = extract_all_cuits(text)
+    if cuits:
+        return cuits[0]
+    return None
+
+
 def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Optional[str]]:
     """
     Devuelve (DocTipoReceptor, DocNroReceptor).
@@ -266,14 +272,11 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
     cuit_emisor = (cuit_emisor or "").strip()
     cuits = extract_all_cuits(text)
 
-    # Elegimos el primer CUIT que NO sea el emisor; en muchos PDFs el emisor aparece primero.
     for c in cuits:
         if cuit_emisor and c == cuit_emisor:
             continue
-        # Heurística extra: evitar “basura” (igual, ya son 11 dígitos)
         return 80, c
 
-    # DNI fallback
     dni = find_first([DNI_RE], text)
     if dni:
         return 96, dni
@@ -285,6 +288,9 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
+
+# IMPORTANTE:
+# - Este CUIT es el "consultante" (Auth.Cuit), debe ser el tuyo y debe matchear el cert.
 AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
 
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
@@ -302,13 +308,13 @@ WSCDC_URLS = {
 
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
 
-# IMPORTANT: WSCDC requiere SOAPAction válido (si no, fault "valid action parameter").
+# WSCDC requiere SOAPAction válido (si no, fault "valid action parameter").
 WSCDC_SOAP_ACTION = os.getenv(
     "WSCDC_SOAP_ACTION",
     "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
 ).strip()
 
-# Namespace real del servicio WSCDC (según endpoint de AFIP)
+# Namespace real del servicio WSCDC
 WSCDC_NS = os.getenv(
     "WSCDC_NS",
     "http://servicios1.afip.gob.ar/wscdc/",
@@ -319,7 +325,7 @@ def require_afip_env():
     if AFIP_ENV not in ("prod", "homo"):
         raise HTTPException(status_code=500, detail="AFIP_ENV debe ser 'prod' o 'homo'")
     if not AFIP_CUIT:
-        raise HTTPException(status_code=500, detail="Falta AFIP_CUIT en variables de entorno")
+        raise HTTPException(status_code=500, detail="Falta AFIP_CUIT (CUIT consultante) en variables de entorno")
     if not AFIP_CERT_B64 or not AFIP_KEY_B64:
         raise HTTPException(status_code=500, detail="Faltan AFIP_CERT_B64 y/o AFIP_KEY_B64 en variables de entorno")
 
@@ -334,7 +340,6 @@ def b64_to_bytes(s: str) -> bytes:
 class AfipTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
         ctx = ssl.create_default_context()
-        # Clave: permite parámetros DH más chicos (solo para AFIP via este adapter)
         ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
         pool_kwargs["ssl_context"] = ctx
         self.poolmanager = PoolManager(num_pools=connections, maxsize=maxsize, block=block, **pool_kwargs)
@@ -379,7 +384,7 @@ def _run_openssl(cmd: List[str]) -> None:
 
 def normalize_cert_key_to_pem(cert_bytes: bytes, key_bytes: bytes) -> tuple[bytes, bytes]:
     cert_is_pem = b"BEGIN CERTIFICATE" in cert_bytes
-    key_is_pem = b"BEGIN" in key_bytes  # RSA PRIVATE KEY / PRIVATE KEY, etc.
+    key_is_pem = b"BEGIN" in key_bytes
 
     if cert_is_pem and key_is_pem:
         return cert_bytes, key_bytes
@@ -469,10 +474,7 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": "loginCms",
-    }
+    headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "loginCms"}
 
     r = AFIP_SESSION.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
     if r.status_code != 200:
@@ -513,19 +515,11 @@ def wscdc_comprobante_constatar(
     doc_tipo_receptor: Optional[int] = None,
     doc_nro_receptor: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    WSCDC: ComprobanteConstatar
-    - SOAPAction correcto (si no, fault "valid action parameter")
-    - Namespace real
-    - Incluye ImpTotal y CuitEmisor (muy comúnmente requeridos)
-    - Incluye DocTipoReceptor/DocNroReceptor si están disponibles (en Factura A suele ser clave)
-    """
     ta = wsaa_login_get_ta(service="wscdc")
 
     url = WSCDC_URLS[AFIP_ENV]
-    cuit_consulta = AFIP_CUIT  # CUIT del contribuyente que consulta
+    cuit_consulta = AFIP_CUIT  # CUIT consultante (cert)
 
-    # Armado dinámico de nodos del receptor (para A suele ser necesario; para B/C se envía si se detecta)
     receptor_xml = ""
     if doc_tipo_receptor and doc_nro_receptor:
         receptor_xml = f"""
@@ -559,7 +553,6 @@ def wscdc_comprobante_constatar(
 
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        # Comillas para SOAP 1.1 en .asmx
         "SOAPAction": f"\"{WSCDC_SOAP_ACTION}\"",
     }
 
@@ -567,7 +560,6 @@ def wscdc_comprobante_constatar(
     if r.status_code != 200:
         raise RuntimeError(f"WSCDC HTTP {r.status_code}: {r.text[:2000]}")
 
-    # Parse básico
     root = ET.fromstring(r.text)
 
     resultado = None
@@ -576,30 +568,7 @@ def wscdc_comprobante_constatar(
             resultado = el.text.strip()
             break
 
-    # Extras útiles (errores/observaciones si vienen)
-    errors = []
-    obs = []
-
-    for el in root.iter():
-        tag = el.tag.lower()
-        if tag.endswith("err") or tag.endswith("errors"):
-            pass
-
-    # Heurística: capturar nodos <Err> / <Obs> aunque estén en distintos namespaces
-    for el in root.iter():
-        tag = el.tag.lower()
-        if tag.endswith("err"):
-            code = el.findtext("./*[(local-name()='Code') or (local-name()='code')]")
-            msg = el.findtext("./*[(local-name()='Msg') or (local-name()='msg')]")
-            if code or msg:
-                errors.append({"code": code, "msg": msg})
-        if tag.endswith("obs"):
-            code = el.findtext("./*[(local-name()='Code') or (local-name()='code')]")
-            msg = el.findtext("./*[(local-name()='Msg') or (local-name()='msg')]")
-            if code or msg:
-                obs.append({"code": code, "msg": msg})
-
-    return {"resultado": resultado, "errors": errors, "obs": obs, "raw": r.text}
+    return {"resultado": resultado, "raw": r.text}
 
 
 # ============================================================
@@ -623,7 +592,6 @@ async def verify(
             pdf_bytes = await f.read()
             text = extract_text_pdf(pdf_bytes, max_pages=5)
 
-            # Detectores base
             cae_pdf = find_first(CAE_PATTERNS, text)
             vto_raw = find_first(VTO_PATTERNS, text)
             vto_pdf = parse_date(vto_raw)
@@ -643,12 +611,13 @@ async def verify(
             cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
             cbte_fch_yyyymmdd = date_to_yyyymmdd(cbte_fch)
 
-            # Emisor: por defecto el CUIT que consulta (tu env).
-            # Si estás validando comprobantes de terceros, cambiá esta lógica por extracción del CUIT emisor del PDF.
-            cuit_emisor = AFIP_CUIT
+            # ================================
+            # CLAVE: CUIT EMISOR = DEL PDF
+            # ================================
+            cuit_emisor = decide_cuit_emisor(text)
 
-            # Receptor: auto-detección
-            doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor)
+            # Receptor: auto-detección (si hay 2 CUITs, toma el que no es emisor)
+            doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor or "")
 
             status = []
             status.append("CAE encontrado" if cae_pdf else "CAE NO encontrado")
@@ -663,12 +632,7 @@ async def verify(
             if factura_letra:
                 status.append(f"Factura {factura_letra}")
 
-            # ========================================================
-            # Reglas automáticas A/B/C (mínimo necesario para WSCDC)
-            # ========================================================
-            # - ImpTotal: requerido en la práctica para validar consistentemente.
-            # - Factura A: normalmente exige datos del receptor (DocTipo/Nro).
-            # - Factura B/C: se envía receptor si se detecta; si no, no bloquea.
+            # Reglas automáticas A/B/C
             require_receptor = (factura_letra == "A")
 
             missing = []
@@ -685,7 +649,7 @@ async def verify(
             if imp_total is None:
                 missing.append("ImpTotal")
             if not cuit_emisor:
-                missing.append("CuitEmisor")
+                missing.append("CuitEmisor(PDF)")
 
             if require_receptor:
                 if not doc_tipo_rec:
@@ -713,7 +677,6 @@ async def verify(
                 })
                 continue
 
-            # Llamada WSCDC
             try:
                 res = wscdc_comprobante_constatar(
                     cbte_tipo=cbte_tipo,
@@ -729,14 +692,7 @@ async def verify(
 
                 resultado = (res.get("resultado") or "").strip()
                 if resultado:
-                    # Convención práctica
                     afip_ok = resultado.upper() in ("A", "OK", "APROBADO")
-                    # Detalle enriquecido si hay errors/obs
-                    detail_bits = [f"WSCDC Resultado={resultado}"]
-                    if res.get("errors"):
-                        detail_bits.append(f"Errors={res['errors']}")
-                    if res.get("obs"):
-                        detail_bits.append(f"Obs={res['obs']}")
                     out_rows.append({
                         "Archivo": f.filename,
                         "CAE": cae_pdf or "",
@@ -752,7 +708,7 @@ async def verify(
                         "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                         "DocNroRec": doc_nro_rec or "",
                         "AFIP": "OK" if afip_ok else "NO_CONSTA",
-                        "Detalle AFIP": " | ".join(detail_bits),
+                        "Detalle AFIP": f"WSCDC Resultado={resultado}",
                     })
                 else:
                     out_rows.append({
