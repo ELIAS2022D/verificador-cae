@@ -326,10 +326,15 @@ def wsaa_login_get_ta(service: str) -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
+    headers = {
+    "Content-Type": "text/xml; charset=utf-8",
+    "SOAPAction": "loginCms",      # clave para Axis (NoSOAPAction)
+    }
+
     r = requests.post(
         wsaa_url,
         data=soap.encode("utf-8"),
-        headers={"Content-Type": "text/xml; charset=utf-8"},
+        headers=headers,
         timeout=40
     )
     if r.status_code != 200:
