@@ -29,7 +29,7 @@ def show_hero_gif():
         return
 
     # GIF levemente más chico, mantiene animación y alineación izquierda
-    st.image(str(gif_path), width=260)
+    st.image(str(gif_path), width=800)
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
