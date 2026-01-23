@@ -356,10 +356,7 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": '"ComprobanteConstatar"',
-    }
+    headers = {"Content-Type": "text/xml; charset=utf-8"}
 
     # >>> USAR AFIP_SESSION (TLS compatible)
     r = AFIP_SESSION.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
@@ -425,10 +422,7 @@ def wscdc_comprobante_constatar(
   </soapenv:Body>
 </soapenv:Envelope>"""
 
-    headers = {
-        "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": '"ComprobanteConstatar"',
-    }
+    headers = {"Content-Type": "text/xml; charset=utf-8"}
 
     # >>> USAR AFIP_SESSION (TLS compatible)
     r = AFIP_SESSION.post(url, data=soap.encode("utf-8"), headers=headers, timeout=60)
