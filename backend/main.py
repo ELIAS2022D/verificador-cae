@@ -10,6 +10,12 @@ import tempfile
 
 import pdfplumber
 import requests
+
+# ===== TLS adapter (FIX DH_KEY_TOO_SMALL) =====
+import ssl
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
+
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
@@ -110,6 +116,7 @@ CBTEFCH_PATTERNS = [
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{4}[/-]\d{2}[/-]\d{2})\b", re.IGNORECASE),
 ]
 
+
 def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         texts = []
@@ -117,12 +124,14 @@ def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
             texts.append(page.extract_text() or "")
         return "\n".join(texts)
 
+
 def find_first(patterns, text: str) -> Optional[str]:
     for pat in patterns:
         m = pat.search(text)
         if m:
             return m.group(1)
     return None
+
 
 def find_ptovta(text: str) -> Optional[str]:
     for pat in PTOVTA_PATTERNS:
@@ -133,6 +142,7 @@ def find_ptovta(text: str) -> Optional[str]:
             return m.group(1)
     return None
 
+
 def find_cbtenro(text: str) -> Optional[str]:
     for pat in CBTENRO_PATTERNS:
         m = pat.search(text)
@@ -141,6 +151,7 @@ def find_cbtenro(text: str) -> Optional[str]:
                 return m.group(2)
             return m.group(1)
     return None
+
 
 def parse_date(date_str: Optional[str]):
     if not date_str:
@@ -153,8 +164,10 @@ def parse_date(date_str: Optional[str]):
             pass
     return None
 
+
 def basic_format_ok(cae: Optional[str]) -> bool:
     return bool(cae and re.fullmatch(r"\d{14}", cae))
+
 
 def date_to_yyyymmdd(d) -> Optional[str]:
     if not d:
@@ -171,25 +184,21 @@ AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
 AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
 
-# WSAA
 WSAA_URLS = {
     "prod": "https://wsaa.afip.gov.ar/ws/services/LoginCms",
     "homo": "https://wsaahomo.afip.gov.ar/ws/services/LoginCms",
 }
 
-# WSCDC (según manual; prod usa ARCA) :contentReference[oaicite:1]{index=1}
 WSCDC_URLS = {
     "prod": "https://servicios1.afip.gov.ar/WSCDC/service.asmx",
     "homo": "https://wswhomo.afip.gob.ar/WSCDC/service.asmx",
 }
 
-# SOAPAction default (AXIS/ASMX suele requerirlo)
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
 WSCDC_SOAP_ACTION = os.getenv(
     "WSCDC_SOAP_ACTION", "http://ar.gov.afip.dif.wscdc/ComprobanteConstatar"
 ).strip()
 
-# Namespace típico WSCDC
 WSCDC_NS = os.getenv("WSCDC_NS", "http://ar.gov.afip.dif.wscdc/").strip()
 
 
@@ -206,16 +215,35 @@ def b64_to_bytes(s: str) -> bytes:
     return base64.b64decode(s.encode("utf-8"))
 
 
-# Cache simple del TA (token+sign) en memoria del proceso
+# ============================================================
+# TLS FIX: bajar SECLEVEL solo para AFIP (DH_KEY_TOO_SMALL)
+# ============================================================
+class AfipTLSAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        ctx = ssl.create_default_context()
+        # Clave: permite parámetros DH más chicos (solo para AFIP via este adapter)
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+        pool_kwargs["ssl_context"] = ctx
+        self.poolmanager = PoolManager(num_pools=connections, maxsize=maxsize, block=block, **pool_kwargs)
+
+
+AFIP_SESSION = requests.Session()
+AFIP_SESSION.mount("https://wsaa.afip.gov.ar", AfipTLSAdapter())
+AFIP_SESSION.mount("https://wsaahomo.afip.gov.ar", AfipTLSAdapter())
+AFIP_SESSION.mount("https://servicios1.afip.gov.ar", AfipTLSAdapter())
+AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
+
+
+# ============================================================
+# WSAA cache (token+sign)
+# ============================================================
 _TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
 
 
 def build_tra(service: str) -> str:
-    # WSAA es sensible a relojes desfasados: margen
     now = datetime.now(timezone.utc)
     gen = now - timedelta(minutes=5)
     exp = now + timedelta(hours=8)
-
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <loginTicketRequest version="1.0">
   <header>
@@ -237,12 +265,8 @@ def _run_openssl(cmd: List[str]) -> None:
 
 
 def normalize_cert_key_to_pem(cert_bytes: bytes, key_bytes: bytes) -> tuple[bytes, bytes]:
-    """
-    Acepta cert/key en PEM o DER.
-    Devuelve ambos en PEM.
-    """
     cert_is_pem = b"BEGIN CERTIFICATE" in cert_bytes
-    key_is_pem = b"BEGIN" in key_bytes  # puede ser RSA PRIVATE KEY / PRIVATE KEY
+    key_is_pem = b"BEGIN" in key_bytes  # RSA PRIVATE KEY / PRIVATE KEY, etc.
 
     if cert_is_pem and key_is_pem:
         return cert_bytes, key_bytes
@@ -262,15 +286,12 @@ def normalize_cert_key_to_pem(cert_bytes: bytes, key_bytes: bytes) -> tuple[byte
             with open(cert_out, "wb") as f:
                 f.write(cert_bytes)
         else:
-            # DER -> PEM
             _run_openssl(["openssl", "x509", "-inform", "DER", "-in", cert_in, "-out", cert_out])
 
         if key_is_pem:
             with open(key_out, "wb") as f:
                 f.write(key_bytes)
         else:
-            # DER -> PEM (intento genérico)
-            # si falla, te lo va a decir
             _run_openssl(["openssl", "rsa", "-inform", "DER", "-in", key_in, "-out", key_out])
 
         with open(cert_out, "rb") as f:
@@ -282,9 +303,6 @@ def normalize_cert_key_to_pem(cert_bytes: bytes, key_bytes: bytes) -> tuple[byte
 
 
 def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> bytes:
-    """
-    Firma CMS (PKCS#7) usando openssl.
-    """
     with tempfile.TemporaryDirectory() as tmp:
         cert_path = os.path.join(tmp, "cert.pem")
         key_path = os.path.join(tmp, "private.key")
@@ -315,9 +333,6 @@ def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> byte
 
 
 def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
-    """
-    Devuelve token+sign, usando cache si no expiró.
-    """
     now = datetime.now(timezone.utc)
     if _TA_CACHE["token"] and _TA_CACHE["sign"] and _TA_CACHE["exp_utc"]:
         if now + timedelta(minutes=2) < _TA_CACHE["exp_utc"]:
@@ -343,12 +358,13 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
 
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": WSAA_SOAP_ACTION,  # clave para evitar Client.NoSOAPAction
+        "SOAPAction": WSAA_SOAP_ACTION,
     }
 
-    r = requests.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
+    # >>> USAR AFIP_SESSION (TLS compatible)
+    r = AFIP_SESSION.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
     if r.status_code != 200:
-        raise RuntimeError(f"WSAA HTTP {r.status_code}: {r.text[:600]}")
+        raise RuntimeError(f"WSAA HTTP {r.status_code}: {r.text[:800]}")
 
     root = ET.fromstring(r.text)
     ta_xml = None
@@ -381,9 +397,6 @@ def wscdc_comprobante_constatar(
     cbte_fch_yyyymmdd: str,
     cae: str,
 ) -> Dict[str, Any]:
-    """
-    WSCDC: ComprobanteConstatar (constata CAE contra AFIP).
-    """
     ta = wsaa_login_get_ta(service="wscdc")
 
     url = WSCDC_URLS[AFIP_ENV]
@@ -417,30 +430,18 @@ def wscdc_comprobante_constatar(
         "SOAPAction": WSCDC_SOAP_ACTION,
     }
 
-    r = requests.post(url, data=soap.encode("utf-8"), headers=headers, timeout=60)
+    # >>> USAR AFIP_SESSION (TLS compatible)
+    r = AFIP_SESSION.post(url, data=soap.encode("utf-8"), headers=headers, timeout=60)
     if r.status_code != 200:
-        raise RuntimeError(f"WSCDC HTTP {r.status_code}: {r.text[:900]}")
+        raise RuntimeError(f"WSCDC HTTP {r.status_code}: {r.text[:1200]}")
 
-    # Parse básico: buscamos Resultado / Obs / Err si aparecen
     root = ET.fromstring(r.text)
 
-    # heurística de campos: Resultado suele ser "A" (aprobado) / "R" etc, depende del ws
     result = None
     for el in root.iter():
         if el.tag.lower().endswith("resultado") and el.text:
             result = el.text.strip()
             break
-
-    # Observaciones / Errores (si están)
-    obs = []
-    errs = []
-    # Intento genérico
-    for el in root.iter():
-        tag = el.tag.lower()
-        if tag.endswith("obs") or tag.endswith("observaciones"):
-            pass
-        if tag.endswith("err") or tag.endswith("errors"):
-            pass
 
     return {"resultado": result, "raw": r.text}
 
@@ -492,7 +493,6 @@ async def verify(
             else:
                 status.append("Vto no detectado")
 
-            # Requisitos mínimos WSCDC: tipo/pto/nro/fch/cae
             missing = []
             if not cbte_tipo:
                 missing.append("CbteTipo")
@@ -520,7 +520,6 @@ async def verify(
                 })
                 continue
 
-            # ========== AFIP REAL (WSAA + WSCDC) ==========
             try:
                 res = wscdc_comprobante_constatar(
                     cbte_tipo=cbte_tipo,
@@ -530,11 +529,7 @@ async def verify(
                     cae=str(cae_pdf).strip(),
                 )
 
-                # Interpretación simple del resultado
-                # (si no viene "resultado" igual devolvemos OK_HTTP)
                 if res.get("resultado"):
-                    # muchos servicios usan "A" (aprobado) como OK.
-                    # si tu respuesta devuelve otro código, lo vemos y lo ajustamos.
                     afip_ok = res["resultado"].upper() in ("A", "OK", "APROBADO")
                     out_rows.append({
                         "Archivo": f.filename,
@@ -563,7 +558,6 @@ async def verify(
                     })
 
             except Exception as e:
-                # fail_wsaa / fail_wscdc: no rompemos todo, devolvemos el error por fila
                 out_rows.append({
                     "Archivo": f.filename,
                     "CAE": cae_pdf or "",
@@ -574,7 +568,7 @@ async def verify(
                     "CbteNro": cbte_nro,
                     "CbteFch": cbte_fch_yyyymmdd,
                     "AFIP": "ERROR_AFIP",
-                    "Detalle AFIP": str(e)[:900],
+                    "Detalle AFIP": str(e)[:1200],
                 })
 
         except Exception as e:
@@ -588,7 +582,7 @@ async def verify(
                 "CbteNro": "",
                 "CbteFch": "",
                 "AFIP": "ERROR",
-                "Detalle AFIP": str(e)[:300],
+                "Detalle AFIP": str(e)[:600],
             })
 
     return {"rows": out_rows}
