@@ -39,7 +39,7 @@ if not st.session_state.auth.get("logged", False):
     col1, col2, col3, col4, col5 = st.columns([1, 1, 3, 1, 1])
     with col3:
         if gif_path.exists():
-            st.image(gif_path.read_bytes(), width=420)
+            st.image(gif_path.read_bytes(), use_container_width=True)
         else:
             st.warning(f"No se encontró el GIF en: {gif_path}")
 
