@@ -21,17 +21,6 @@ if not BASE_URL:
     st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
     st.stop()
 
-# ===================== HERO GIF (solo cuando NO hay login) =====================
-gif_path = Path(__file__).parent / "assets" / "conexion.gif"
-
-def show_hero_gif():
-    if not gif_path.exists():
-        return
-
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.image(str(gif_path), width=800)
-
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
     re.compile(r"\bCAE\b\D{0,30}(\d{14})\b", re.IGNORECASE),
