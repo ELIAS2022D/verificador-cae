@@ -51,43 +51,67 @@ def find_cae(text: str):
 # ===================== VERIFY =====================
 @app.post("/verify")
 async def verify(
-    cuit: str = Form(...),
     files: List[UploadFile] = File(...),
-    x_api_key: str = Header(""),
-    authorization: str = Header("")
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
 ):
     check_api_key(x_api_key)
-    check_token(authorization)
+    check_bearer(authorization)
 
-    rows = []
+    # CUIT representado fijo desde Render
+    afip_cuit = os.getenv("AFIP_CUIT") or os.getenv("MAXI_CUIT")
+    if not afip_cuit:
+        raise HTTPException(status_code=500, detail="Falta AFIP_CUIT (o MAXI_CUIT) en variables de entorno")
+
+    today = datetime.now().date()
+    out_rows = []
 
     for f in files:
-        pdf_bytes = await f.read()
-        text = extract_text(pdf_bytes)
-        cae = find_cae(text)
+        try:
+            pdf_bytes = await f.read()
+            text = extract_text_pdf(pdf_bytes, max_pages=5)
 
-        if not cae:
-            rows.append({
+            cae = find_cae(text)
+            vto_raw = find_vto(text)
+            vto_date = parse_date(vto_raw)
+
+            fmt_ok = basic_format_ok(cae)
+            vig_ok = (vto_date is not None and vto_date >= today)
+
+            estado = []
+            estado.append("CAE encontrado" if cae else "CAE NO encontrado")
+            if fmt_ok:
+                estado.append("Formato OK")
+            elif cae:
+                estado.append("Formato dudoso")
+            if vto_date:
+                estado.append("Vigente" if vig_ok else "Vencido")
+            else:
+                estado.append("Vto no detectado")
+
+            # ===== AFIP REAL (WSAA + WSCDC/WSFE) =====
+            # Acá llamás tu validador real usando afip_cuit fijo.
+            # Por ahora dejo placeholder (si ya tenés wsdc_consultar, lo conectamos).
+            afip_status = "PENDIENTE"
+            afip_detail = f"AFIP listo (CUIT {afip_cuit}). Falta conectar consulta WS."
+
+            out_rows.append({
                 "Archivo": f.filename,
-                "AFIP": "NO",
-                "Detalle AFIP": "CAE no encontrado en PDF"
+                "CAE": cae or "",
+                "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
+                "Estado": " | ".join(estado),
+                "AFIP": afip_status,
+                "Detalle AFIP": afip_detail,
             })
-            continue
 
-        # ⚠️ ACA tenés que ajustar tipo_cbte / pto_vta / nro_cbte
-        # para la demo podés hardcodear o parsear del PDF
-        response_xml = wsdc_consultar(
-            cuit_emisor=cuit,
-            tipo_cbte=6,     # Factura B
-            pto_vta=1,
-            nro_cbte=1
-        )
+        except Exception as e:
+            out_rows.append({
+                "Archivo": f.filename,
+                "CAE": "",
+                "Vto CAE": "",
+                "Estado": f"Error procesando PDF: {e}",
+                "AFIP": "ERROR",
+                "Detalle AFIP": str(e),
+            })
 
-        rows.append({
-            "Archivo": f.filename,
-            "CAE": cae,
-            "AFIP": "OK",
-            "Detalle AFIP": "Validado contra AFIP (WSCDC)"
-        })
-
-    return {"rows": rows}
+    return {"rows": out_rows}

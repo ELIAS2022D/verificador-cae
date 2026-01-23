@@ -2,29 +2,16 @@ import io
 import zipfile
 import re
 from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
-import streamlit as st
 import pdfplumber
 import requests
-from pathlib import Path
+import streamlit as st
 
 # ===================== CONFIG =====================
 st.set_page_config(page_title="Verificador CAE", layout="wide")
 st.title("Verificador de CAE")
-
-# ===================== HERO GIF (LOGIN) =====================
-gif_path = Path(__file__).parent / "assets" / "conexion.gif"
-
-if not st.session_state.get("auth", {}).get("logged", False):
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 3, 1, 1])
-    with col3:
-        if gif_path.exists():
-            st.image(
-                gif_path.read_bytes(),
-                use_container_width=True
-            )
-        else:
-            st.warning(f"No se encontró el GIF en {gif_path}")
 
 BASE_URL = st.secrets.get("BASE_URL", "")
 DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
@@ -32,6 +19,29 @@ DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
 if not BASE_URL:
     st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
     st.stop()
+
+# ===================== SESSION STATE =====================
+def ensure_auth_state():
+    if "auth" not in st.session_state:
+        st.session_state.auth = {
+            "logged": False,
+            "api_key": DEFAULT_BACKEND_API_KEY,
+            "access_token": "",
+            "cuit": "",
+        }
+
+ensure_auth_state()
+
+# ===================== HERO GIF (LOGIN) =====================
+gif_path = Path(__file__).parent / "assets" / "conexion.gif"
+
+if not st.session_state.auth.get("logged", False):
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 3, 1, 1])
+    with col3:
+        if gif_path.exists():
+            st.image(gif_path.read_bytes(), width=420)
+        else:
+            st.warning(f"No se encontró el GIF en: {gif_path}")
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
@@ -75,10 +85,10 @@ def find_vto(text: str):
 def parse_date(date_str: str):
     if not date_str:
         return None
-    date_str = date_str.strip()
+    s = date_str.strip()
     for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%Y-%m-%d"):
         try:
-            return datetime.strptime(date_str, fmt).date()
+            return datetime.strptime(s, fmt).date()
         except ValueError:
             pass
     return None
@@ -93,47 +103,33 @@ def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
             texts.append(page.extract_text() or "")
         return "\n".join(texts)
 
-# ===================== SESSION STATE =====================
-def ensure_auth_state():
-    if "auth" not in st.session_state:
-        st.session_state.auth = {
-            "logged": False,
-            "api_key": DEFAULT_BACKEND_API_KEY,
-            "access_token": "",
-            "cuit": ""
-        }
-
-ensure_auth_state()
-
 # ===================== BACKEND CALLS =====================
 def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
+    headers = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
     r = requests.post(
         f"{base_url}/auth/login",
         json={"cuit": cuit, "password": password},
-        headers={"X-API-Key": api_key} if api_key else {},
+        headers=headers,
         timeout=30,
     )
     if r.status_code != 200:
         raise RuntimeError(f"Login falló ({r.status_code}): {r.text}")
+
     data = r.json()
     token = data.get("access_token")
     if not token:
         raise RuntimeError("Login OK pero el backend no devolvió access_token.")
     return token
 
-def backend_verify(
-    base_url: str,
-    api_key: str,
-    access_token: str,
-    pdf_items: list,
-):
+def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: list):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
         headers["X-API-Key"] = api_key
 
-    files = []
-    for it in pdf_items:
-        files.append(("files", (it["name"], it["bytes"], "application/pdf")))
+    files = [("files", (it["name"], it["bytes"], "application/pdf")) for it in pdf_items]
 
     r = requests.post(
         f"{base_url}/verify",
@@ -148,23 +144,21 @@ def backend_verify(
 # ===================== SIDEBAR: LOGIN =====================
 with st.sidebar:
     st.subheader("Login")
-    api_key = st.session_state.auth["api_key"]
 
     cuit_login_default = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
-    cuit_login = st.text_input("CUIT", value=st.session_state.auth["cuit"] or cuit_login_default)
+    cuit_login = st.text_input("CUIT", value=st.session_state.auth.get("cuit") or cuit_login_default)
     password = st.text_input("Contraseña", type="password")
 
     colA, colB = st.columns(2)
     with colA:
         if st.button("Ingresar"):
             try:
-                token = backend_login(BASE_URL, api_key, cuit_login, password)
-                st.session_state.auth = {
+                token = backend_login(BASE_URL, st.session_state.auth["api_key"], cuit_login, password)
+                st.session_state.auth.update({
                     "logged": True,
-                    "api_key": api_key,
                     "access_token": token,
-                    "cuit": cuit_login
-                }
+                    "cuit": cuit_login,
+                })
                 st.success("Sesión iniciada.")
                 st.rerun()
             except Exception as e:
@@ -176,11 +170,11 @@ with st.sidebar:
                 "logged": False,
                 "api_key": DEFAULT_BACKEND_API_KEY,
                 "access_token": "",
-                "cuit": ""
+                "cuit": "",
             }
             st.rerun()
 
-if not st.session_state.auth["logged"]:
+if not st.session_state.auth.get("logged", False):
     st.info("Iniciá sesión para habilitar carga y validación.")
     st.stop()
 
@@ -215,7 +209,7 @@ else:
                     if len(names) > 20:
                         st.warning(f"El ZIP tiene {len(names)} PDFs. Para demo procesaré solo 20.")
                         names = names[:20]
-                    pdf_files = [{"name": n.split('/')[-1], "bytes": z.read(n)} for n in names]
+                    pdf_files = [{"name": n.split("/")[-1], "bytes": z.read(n)} for n in names]
                     st.success(f"PDFs detectados: {len(pdf_files)}")
         except zipfile.BadZipFile:
             st.error("ZIP inválido o dañado.")
@@ -255,7 +249,6 @@ if pdf_files:
                 "AFIP": "",
                 "Detalle AFIP": "",
             })
-
         except Exception as e:
             rows.append({
                 "Archivo": f["name"],
@@ -268,6 +261,7 @@ if pdf_files:
 
         progress.progress(i / len(pdf_files))
 
+# df “actual” (se actualiza si se valida AFIP)
 df = pd.DataFrame(rows) if rows else pd.DataFrame(
     columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]
 )
@@ -300,22 +294,29 @@ if st.button("Validar contra AFIP ahora"):
             st.dataframe(df, use_container_width=True)
         else:
             st.warning("El backend no devolvió rows. Revisá /verify.")
-
     except Exception as e:
         st.error(str(e))
 
 # ===================== EXPORTS (CSV + XLSX) =====================
+# Exporta SIEMPRE la df que esté en pantalla (local o post-validación AFIP)
 if not df.empty:
-    if "CAE" in df.columns:
-        df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+    export_df = df.copy()
 
-    if "Estado" in df.columns:
-        df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
+    # CAE como texto (evitar notación científica)
+    if "CAE" in export_df.columns:
+        export_df["CAE"] = export_df["CAE"].astype(str).apply(
+            lambda x: f"'{x}" if x and x != "nan" else ""
+        )
+
+    # limpiar saltos de línea
+    for col in ["Estado", "Detalle AFIP"]:
+        if col in export_df.columns:
+            export_df[col] = export_df[col].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
     col1, col2 = st.columns(2)
 
     with col1:
-        csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+        csv_bytes = export_df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(
             "Descargar CSV (Excel)",
             data=csv_bytes,
@@ -326,7 +327,7 @@ if not df.empty:
     with col2:
         xlsx_buffer = io.BytesIO()
         with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="Resultados")
+            export_df.to_excel(writer, index=False, sheet_name="Resultados")
         st.download_button(
             "Descargar Excel (.xlsx)",
             data=xlsx_buffer.getvalue(),
