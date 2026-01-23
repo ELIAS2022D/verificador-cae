@@ -358,7 +358,8 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
 
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": WSAA_SOAP_ACTION,
+        # AFIP/ASMX suele requerir comillas
+        "SOAPAction": '"http://ar.gov.afip.dif.wscdc/ComprobanteConstatar"',
     }
 
     # >>> USAR AFIP_SESSION (TLS compatible)
@@ -427,7 +428,8 @@ def wscdc_comprobante_constatar(
 
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": WSCDC_SOAP_ACTION,
+        # AFIP/ASMX suele requerir comillas
+        "SOAPAction": '"http://ar.gov.afip.dif.wscdc/ComprobanteConstatar"',
     }
 
     # >>> USAR AFIP_SESSION (TLS compatible)
