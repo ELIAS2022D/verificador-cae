@@ -30,7 +30,7 @@ def show_hero_gif():
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image(str(gif_path), width=320)
+        st.image(str(gif_path), width=600)
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
