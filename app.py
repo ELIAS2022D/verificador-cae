@@ -36,10 +36,10 @@ ensure_auth_state()
 gif_path = Path(__file__).parent / "assets" / "conexion.gif"
 
 if not st.session_state.auth.get("logged", False):
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 3, 1, 1])
-    with col3:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
         if gif_path.exists():
-            st.image(gif_path.read_bytes(), use_container_width=True)
+            st.image(gif_path.read_bytes(), width=360)  # probá 280/320/360
         else:
             st.warning(f"No se encontró el GIF en: {gif_path}")
 
