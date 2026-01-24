@@ -228,7 +228,7 @@ try:
     with colm3:
         st.metric("Mes", ym or "-")
 
-    if st.button("Enviar resumen por Gmail al cliente"):
+    if st.button("Enviar resumen por Gmail"):
         try:
             resp = backend_send_usage_email(
                 base_url=BASE_URL,
