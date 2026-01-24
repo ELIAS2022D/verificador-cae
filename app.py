@@ -14,7 +14,6 @@ import requests
 # ===================== CONFIG =====================
 st.set_page_config(page_title="Verificador CAE", layout="wide")
 st.title("Verificador de CAE")
-st.error("VERSIÓN NUEVA – SIN LÍMITE 20 – 24/01")
 
 BASE_URL = st.secrets.get("BASE_URL", "")
 DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
