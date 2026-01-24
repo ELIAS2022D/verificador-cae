@@ -24,10 +24,10 @@ from pydantic import BaseModel
 
 
 # ============================================================
-# LOGGING (para ver por qué Postgres cae a SQLite)
+# LOGGING
 # ============================================================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("usage")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("verificador-cae")
 
 
 # ============================================================
@@ -78,11 +78,17 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 
 
 # ============================================================
-# USAGE COUNTER (Supabase Postgres preferred, SQLite fallback)
+# USAGE COUNTER (Neon Postgres preferred, SQLite fallback)
 # ============================================================
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Supabase/Postgres
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Neon/Postgres
 SQLITE_PATH = os.getenv("SQLITE_PATH", "usage.db").strip()
+
+# En PROD recomendable: no fallback silencioso.
+# - USAGE_FALLBACK_SQLITE=1 -> permite fallback a SQLite si Postgres falla
+USAGE_FALLBACK_SQLITE = os.getenv("USAGE_FALLBACK_SQLITE", "0").strip() in ("1", "true", "True", "YES", "yes")
+
 _DB_LOCK = threading.Lock()
+_PG_READY = False  # cache simple: si init ok una vez
 
 
 def _is_postgres(dsn: str) -> bool:
@@ -110,6 +116,7 @@ def _sqlite_init():
 
 def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
     now_iso = datetime.now(timezone.utc).isoformat()
+    _sqlite_init()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -134,18 +141,33 @@ def _sqlite_get(year_month: str) -> Dict[str, Any]:
         )
         row = cur.fetchone()
     if not row:
-        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
-    return {"year_month": row[0], "files_count": int(row[1]), "requests_count": int(row[2]), "updated_at": row[3]}
+        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None, "storage": "sqlite"}
+    return {
+        "year_month": row[0],
+        "files_count": int(row[1]),
+        "requests_count": int(row[2]),
+        "updated_at": row[3],
+        "storage": "sqlite",
+    }
+
+
+def _pg_connect():
+    # Import lazy para no romper arranque si no está instalado
+    import psycopg
+
+    # Neon requiere SSL; normalmente ya viene en el string.
+    return psycopg.connect(DATABASE_URL)
 
 
 def _pg_init():
-    import psycopg
-
-    with psycopg.connect(DATABASE_URL) as con:
+    global _PG_READY
+    if _PG_READY:
+        return
+    with _pg_connect() as con:
         with con.cursor() as cur:
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS usage_monthly (
+                CREATE TABLE IF NOT EXISTS public.usage_monthly (
                     year_month TEXT PRIMARY KEY,
                     files_count BIGINT NOT NULL DEFAULT 0,
                     requests_count BIGINT NOT NULL DEFAULT 0,
@@ -154,21 +176,21 @@ def _pg_init():
                 """
             )
         con.commit()
+    _PG_READY = True
 
 
 def _pg_upsert(year_month: str, files_delta: int, requests_delta: int):
-    import psycopg
-
     now = datetime.now(timezone.utc)
-    with psycopg.connect(DATABASE_URL) as con:
+    _pg_init()
+    with _pg_connect() as con:
         with con.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO usage_monthly (year_month, files_count, requests_count, updated_at)
+                INSERT INTO public.usage_monthly (year_month, files_count, requests_count, updated_at)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (year_month) DO UPDATE SET
-                    files_count = usage_monthly.files_count + EXCLUDED.files_count,
-                    requests_count = usage_monthly.requests_count + EXCLUDED.requests_count,
+                    files_count = public.usage_monthly.files_count + EXCLUDED.files_count,
+                    requests_count = public.usage_monthly.requests_count + EXCLUDED.requests_count,
                     updated_at = EXCLUDED.updated_at;
                 """,
                 (year_month, int(files_delta), int(requests_delta), now),
@@ -177,23 +199,22 @@ def _pg_upsert(year_month: str, files_delta: int, requests_delta: int):
 
 
 def _pg_get(year_month: str) -> Dict[str, Any]:
-    import psycopg
-
     _pg_init()
-    with psycopg.connect(DATABASE_URL) as con:
+    with _pg_connect() as con:
         with con.cursor() as cur:
             cur.execute(
-                "SELECT year_month, files_count, requests_count, updated_at FROM usage_monthly WHERE year_month = %s",
+                "SELECT year_month, files_count, requests_count, updated_at FROM public.usage_monthly WHERE year_month = %s",
                 (year_month,),
             )
             row = cur.fetchone()
     if not row:
-        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
+        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None, "storage": "postgres"}
     return {
         "year_month": row[0],
         "files_count": int(row[1]),
         "requests_count": int(row[2]),
         "updated_at": str(row[3]) if row[3] is not None else None,
+        "storage": "postgres",
     }
 
 
@@ -205,10 +226,12 @@ def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]
                 _pg_upsert(ym, files_delta, requests_delta)
                 return _pg_get(ym)
             except Exception as e:
-                logger.exception("Postgres usage_increment failed; fallback SQLite. Error: %s", e)
-                _sqlite_upsert(ym, files_delta, requests_delta)
-                return _sqlite_get(ym)
-
+                logger.exception("Postgres usage_increment failed. Error: %s", e)
+                if USAGE_FALLBACK_SQLITE:
+                    _sqlite_upsert(ym, files_delta, requests_delta)
+                    return _sqlite_get(ym)
+                raise
+        # No Postgres configurado -> SQLite
         _sqlite_upsert(ym, files_delta, requests_delta)
         return _sqlite_get(ym)
 
@@ -220,8 +243,10 @@ def usage_current() -> Dict[str, Any]:
             try:
                 return _pg_get(ym)
             except Exception as e:
-                logger.exception("Postgres usage_current failed; fallback SQLite. Error: %s", e)
-                return _sqlite_get(ym)
+                logger.exception("Postgres usage_current failed. Error: %s", e)
+                if USAGE_FALLBACK_SQLITE:
+                    return _sqlite_get(ym)
+                raise
         return _sqlite_get(ym)
 
 
@@ -233,37 +258,48 @@ def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: s
 
 
 @app.get("/usage/diag")
-def usage_diag(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+def usage_diag_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    """
+    Diagnóstico explícito para Neon/Postgres:
+    - confirma que DATABASE_URL está seteada y es postgres
+    - intenta conectar
+    - ejecuta CREATE TABLE
+    - ejecuta SELECT now()
+    """
     check_api_key(x_api_key)
     check_bearer(authorization)
 
-    diag = {
+    diag: Dict[str, Any] = {
         "DATABASE_URL_set": bool(DATABASE_URL),
         "DATABASE_URL_is_postgres": _is_postgres(DATABASE_URL) if DATABASE_URL else False,
+        "USAGE_FALLBACK_SQLITE": USAGE_FALLBACK_SQLITE,
+        "pg_ready_cached": _PG_READY,
     }
 
+    if not (DATABASE_URL and _is_postgres(DATABASE_URL)):
+        diag["status"] = "no_postgres_configured"
+        return diag
+
     try:
+        # Connect + now()
+        with _pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute("select now()")
+                diag["pg_now"] = str(cur.fetchone()[0])
+
+        # init table
         _pg_init()
         diag["pg_init"] = "ok"
-    except Exception as e:
-        diag["pg_init"] = "error"
-        diag["pg_init_error"] = str(e)[:800]
+
+        # roundtrip select
+        diag["sample_row"] = _pg_get(_year_month_utc())
+        diag["status"] = "ok"
         return diag
 
-    try:
-        _pg_upsert(_year_month_utc(), 0, 0)
-        diag["pg_upsert"] = "ok"
     except Exception as e:
-        diag["pg_upsert"] = "error"
-        diag["pg_upsert_error"] = str(e)[:800]
+        diag["status"] = "error"
+        diag["error"] = str(e)[:1500]
         return diag
-
-    try:
-        diag["pg_get"] = _pg_get(_year_month_utc())
-    except Exception as e:
-        diag["pg_get_error"] = str(e)[:800]
-
-    return diag
 
 
 # ============================================================
@@ -678,7 +714,7 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
-    headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "loginCms"}
+    headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": WSAA_SOAP_ACTION or "loginCms"}
 
     r = AFIP_SESSION.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
     if r.status_code != 200:
@@ -791,9 +827,9 @@ async def verify(
     # Contador mensual (cliente por deploy): suma por request y por cantidad de archivos
     try:
         usage_increment(files_delta=len(files), requests_delta=1)
-    except Exception:
-        # No frenamos la validación AFIP por un tema de métricas
-        pass
+    except Exception as e:
+        # No frenamos la validación AFIP por un tema de métricas, pero LOGUEAMOS.
+        logger.exception("usage_increment failed (metrics only). Error: %s", e)
 
     today = datetime.now().date()
     out_rows: List[Dict[str, Any]] = []
