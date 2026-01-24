@@ -11,6 +11,8 @@ import streamlit as st
 import pdfplumber
 import requests
 
+st.write("VERSION APP:", "2026-01-24 15:00 - SIN LIMITE 20")
+
 # ===================== CONFIG =====================
 st.set_page_config(page_title="Verificador CAE", layout="wide")
 st.title("Verificador de CAE")
