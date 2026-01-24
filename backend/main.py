@@ -3,12 +3,12 @@ import io
 import re
 import base64
 import subprocess
+import tempfile
 import threading
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 import xml.etree.ElementTree as ET
-import tempfile
 
 import pdfplumber
 import requests
@@ -70,49 +70,59 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 
 
 # ============================================================
-# USAGE COUNTER (SQLite, por deploy)
+# USAGE COUNTER (Supabase Postgres preferred, SQLite fallback)
 # ============================================================
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Supabase/Postgres
 SQLITE_PATH = os.getenv("SQLITE_PATH", "usage.db").strip()
 _DB_LOCK = threading.Lock()
 
 
-def _get_year_month_utc() -> str:
+def _is_postgres(dsn: str) -> bool:
+    return dsn.startswith("postgres://") or dsn.startswith("postgresql://")
+
+
+def _year_month_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
-def _db_init_sqlite():
+def _sqlite_init():
     with sqlite3.connect(SQLITE_PATH) as con:
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS usage_monthly (
-            year_month TEXT PRIMARY KEY,
-            files_count INTEGER NOT NULL DEFAULT 0,
-            requests_count INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL
-        );
-        """)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_monthly (
+                year_month TEXT PRIMARY KEY,
+                files_count INTEGER NOT NULL DEFAULT 0,
+                requests_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
         con.commit()
 
 
-def _db_upsert_sqlite(year_month: str, files_delta: int, requests_delta: int):
+def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
     now_iso = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(SQLITE_PATH) as con:
-        con.execute("""
-        INSERT INTO usage_monthly (year_month, files_count, requests_count, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(year_month) DO UPDATE SET
-            files_count = files_count + excluded.files_count,
-            requests_count = requests_count + excluded.requests_count,
-            updated_at = excluded.updated_at;
-        """, (year_month, int(files_delta), int(requests_delta), now_iso))
+        con.execute(
+            """
+            INSERT INTO usage_monthly (year_month, files_count, requests_count, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(year_month) DO UPDATE SET
+                files_count = files_count + excluded.files_count,
+                requests_count = requests_count + excluded.requests_count,
+                updated_at = excluded.updated_at;
+            """,
+            (year_month, int(files_delta), int(requests_delta), now_iso),
+        )
         con.commit()
 
 
-def _db_get_sqlite(year_month: str) -> Dict[str, Any]:
-    _db_init_sqlite()
+def _sqlite_get(year_month: str) -> Dict[str, Any]:
+    _sqlite_init()
     with sqlite3.connect(SQLITE_PATH) as con:
         cur = con.execute(
             "SELECT year_month, files_count, requests_count, updated_at FROM usage_monthly WHERE year_month = ?",
-            (year_month,)
+            (year_month,),
         )
         row = cur.fetchone()
     if not row:
@@ -120,18 +130,90 @@ def _db_get_sqlite(year_month: str) -> Dict[str, Any]:
     return {"year_month": row[0], "files_count": int(row[1]), "requests_count": int(row[2]), "updated_at": row[3]}
 
 
+def _pg_init():
+    import psycopg
+
+    with psycopg.connect(DATABASE_URL) as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_monthly (
+                    year_month TEXT PRIMARY KEY,
+                    files_count BIGINT NOT NULL DEFAULT 0,
+                    requests_count BIGINT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL
+                );
+                """
+            )
+        con.commit()
+
+
+def _pg_upsert(year_month: str, files_delta: int, requests_delta: int):
+    import psycopg
+
+    now = datetime.now(timezone.utc)
+    with psycopg.connect(DATABASE_URL) as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO usage_monthly (year_month, files_count, requests_count, updated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (year_month) DO UPDATE SET
+                    files_count = usage_monthly.files_count + EXCLUDED.files_count,
+                    requests_count = usage_monthly.requests_count + EXCLUDED.requests_count,
+                    updated_at = EXCLUDED.updated_at;
+                """,
+                (year_month, int(files_delta), int(requests_delta), now),
+            )
+        con.commit()
+
+
+def _pg_get(year_month: str) -> Dict[str, Any]:
+    import psycopg
+
+    _pg_init()
+    with psycopg.connect(DATABASE_URL) as con:
+        with con.cursor() as cur:
+            cur.execute(
+                "SELECT year_month, files_count, requests_count, updated_at FROM usage_monthly WHERE year_month = %s",
+                (year_month,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
+    return {
+        "year_month": row[0],
+        "files_count": int(row[1]),
+        "requests_count": int(row[2]),
+        "updated_at": str(row[3]) if row[3] is not None else None,
+    }
+
+
 def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]:
-    ym = _get_year_month_utc()
+    ym = _year_month_utc()
     with _DB_LOCK:
-        _db_init_sqlite()
-        _db_upsert_sqlite(ym, files_delta=files_delta, requests_delta=requests_delta)
-        return _db_get_sqlite(ym)
+        if DATABASE_URL and _is_postgres(DATABASE_URL):
+            try:
+                _pg_upsert(ym, files_delta, requests_delta)
+                return _pg_get(ym)
+            except Exception:
+                # fallback (debug / emergencia)
+                _sqlite_upsert(ym, files_delta, requests_delta)
+                return _sqlite_get(ym)
+        else:
+            _sqlite_upsert(ym, files_delta, requests_delta)
+            return _sqlite_get(ym)
 
 
 def usage_current() -> Dict[str, Any]:
-    ym = _get_year_month_utc()
+    ym = _year_month_utc()
     with _DB_LOCK:
-        return _db_get_sqlite(ym)
+        if DATABASE_URL and _is_postgres(DATABASE_URL):
+            try:
+                return _pg_get(ym)
+            except Exception:
+                return _sqlite_get(ym)
+        return _sqlite_get(ym)
 
 
 @app.get("/usage/current")
@@ -190,7 +272,7 @@ CBTEFCH_PATTERNS = [
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{4}[/-]\d{2}[/-]\d{2})\b", re.IGNORECASE),
 ]
 
-# TOTAL / IMPORTE TOTAL (necesario para WSCDC)
+# TOTAL / IMPORTE TOTAL (necesario para WSCDC en muchos casos)
 TOTAL_PATTERNS = [
     re.compile(
         r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|IMPORTE\s+FINAL|TOTAL)\b\D{0,60}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
@@ -202,7 +284,7 @@ TOTAL_PATTERNS = [
     ),
 ]
 
-# Factura A/B/C
+# Factura A/B/C (por texto típico en PDF)
 FACTURA_TIPO_PATTERNS = [
     re.compile(r"\bA\s+FACTURA\b", re.IGNORECASE),
     re.compile(r"\bB\s+FACTURA\b", re.IGNORECASE),
@@ -213,7 +295,7 @@ FACTURA_TIPO_PATTERNS = [
 CUIT_AFTER_LABEL_RE = re.compile(r"\bCUIT:\s*([0-9]{11})\b", re.IGNORECASE)
 CUIT_ANY_11_RE = re.compile(r"\b([0-9]{11})\b")
 
-# DNI (opcional)
+# DNI (si aparece; opcional)
 DNI_RE = re.compile(r"\bDNI\b\D{0,20}(\d{7,8})\b", re.IGNORECASE)
 
 
@@ -314,6 +396,7 @@ def extract_all_cuits(text: str) -> List[str]:
         for m in CUIT_ANY_11_RE.finditer(text):
             cuits.append(m.group(1))
 
+    # unique preservando orden
     seen = set()
     out = []
     for c in cuits:
@@ -324,6 +407,9 @@ def extract_all_cuits(text: str) -> List[str]:
 
 
 def decide_cuit_emisor(text: str) -> Optional[str]:
+    """
+    Heurística: típicamente el primer CUIT visible en la factura es el del EMISOR.
+    """
     cuits = extract_all_cuits(text)
     if cuits:
         return cuits[0]
@@ -335,6 +421,7 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
     Devuelve (DocTipoReceptor, DocNroReceptor).
     - Si encuentra un CUIT distinto al emisor: DocTipo=80 y DocNro = ese CUIT.
     - Si no, intenta DNI: DocTipo=96 y DocNro = DNI.
+    - Si no hay nada: None, None.
     """
     cuit_emisor = (cuit_emisor or "").strip()
     cuits = extract_all_cuits(text)
@@ -356,7 +443,8 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
 
-# CUIT consultante (Auth.Cuit), debe ser el tuyo y matchear el cert.
+# IMPORTANTE:
+# - Este CUIT es el "consultante" (Auth.Cuit), debe ser el tuyo y debe matchear el cert.
 AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
 
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
@@ -374,11 +462,13 @@ WSCDC_URLS = {
 
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
 
+# WSCDC requiere SOAPAction válido (si no, fault "valid action parameter").
 WSCDC_SOAP_ACTION = os.getenv(
     "WSCDC_SOAP_ACTION",
     "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
 ).strip()
 
+# Namespace real del servicio WSCDC
 WSCDC_NS = os.getenv(
     "WSCDC_NS",
     "http://servicios1.afip.gob.ar/wscdc/",
@@ -499,12 +589,19 @@ def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> byte
             f.write(tra_xml.encode("utf-8"))
 
         cmd = [
-            "openssl", "smime", "-sign",
-            "-signer", cert_path,
-            "-inkey", key_path,
-            "-in", tra_path,
-            "-out", out_path,
-            "-outform", "DER",
+            "openssl",
+            "smime",
+            "-sign",
+            "-signer",
+            cert_path,
+            "-inkey",
+            key_path,
+            "-in",
+            tra_path,
+            "-out",
+            out_path,
+            "-outform",
+            "DER",
             "-nodetach",
             "-binary",
         ]
@@ -608,7 +705,7 @@ def wscdc_comprobante_constatar(
         <CbteTipo>{cbte_tipo}</CbteTipo>
         <CbteNro>{cbte_nro}</CbteNro>
         <CbteFch>{cbte_fch_yyyymmdd}</CbteFch>
-        <ImpTotal>{imp_total:.2f}</ImpTotal>
+        <ImpTotal>{float(imp_total):.2f}</ImpTotal>
         <CodAutorizacion>{str(cae).strip()}</CodAutorizacion>
       </CmpReq>
     </ComprobanteConstatar>
@@ -636,7 +733,7 @@ def wscdc_comprobante_constatar(
 
 
 # ============================================================
-# VERIFY ENDPOINT
+# VERIFY ENDPOINT (PROD)
 # ============================================================
 @app.post("/verify")
 async def verify(
@@ -648,11 +745,11 @@ async def verify(
     check_bearer(authorization)
     require_afip_env()
 
-    # Contador mensual (por deploy)
+    # Contador mensual (cliente por deploy): suma por request y por cantidad de archivos
     try:
         usage_increment(files_delta=len(files), requests_delta=1)
     except Exception:
-        # No frenamos la validación si el contador falla
+        # No frenamos la validación AFIP por un tema de métricas
         pass
 
     today = datetime.now().date()
@@ -682,10 +779,12 @@ async def verify(
             cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
             cbte_fch_yyyymmdd = date_to_yyyymmdd(cbte_fch)
 
-            # CUIT EMISOR = DEL PDF
+            # ================================
+            # CLAVE: CUIT EMISOR = DEL PDF
+            # ================================
             cuit_emisor = decide_cuit_emisor(text)
 
-            # Receptor: auto-detección
+            # Receptor: auto-detección (si hay 2 CUITs, toma el que no es emisor)
             doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor or "")
 
             status = []
@@ -727,23 +826,25 @@ async def verify(
                     missing.append("DocNroReceptor")
 
             if missing:
-                out_rows.append({
-                    "Archivo": f.filename,
-                    "CAE": cae_pdf or "",
-                    "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
-                    "Estado": " | ".join(status),
-                    "Factura": factura_letra or "",
-                    "CbteTipo": cbte_tipo_raw or "",
-                    "PtoVta": pto_vta_raw or "",
-                    "CbteNro": cbte_nro_raw or "",
-                    "CbteFch": cbte_fch_raw or "",
-                    "ImpTotal": total_raw or "",
-                    "CuitEmisor": cuit_emisor or "",
-                    "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
-                    "DocNroRec": doc_nro_rec or "",
-                    "AFIP": "DATOS_INSUFICIENTES",
-                    "Detalle AFIP": f"Faltan campos para WSCDC: {', '.join(missing)}. Mejorar extracción del PDF.",
-                })
+                out_rows.append(
+                    {
+                        "Archivo": f.filename,
+                        "CAE": cae_pdf or "",
+                        "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                        "Estado": " | ".join(status),
+                        "Factura": factura_letra or "",
+                        "CbteTipo": cbte_tipo_raw or "",
+                        "PtoVta": pto_vta_raw or "",
+                        "CbteNro": cbte_nro_raw or "",
+                        "CbteFch": cbte_fch_raw or "",
+                        "ImpTotal": total_raw or "",
+                        "CuitEmisor": cuit_emisor or "",
+                        "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
+                        "DocNroRec": doc_nro_rec or "",
+                        "AFIP": "DATOS_INSUFICIENTES",
+                        "Detalle AFIP": f"Faltan campos para WSCDC: {', '.join(missing)}. Mejorar extracción del PDF.",
+                    }
+                )
                 continue
 
             try:
@@ -761,79 +862,88 @@ async def verify(
 
                 resultado = (res.get("resultado") or "").strip()
                 if resultado:
+                    # AFIP: Resultado A suele ser aprobado/ok. R = Rechazado.
                     afip_ok = resultado.upper() in ("A", "OK", "APROBADO")
-                    out_rows.append({
-                        "Archivo": f.filename,
-                        "CAE": cae_pdf or "",
-                        "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
-                        "Estado": " | ".join(status),
-                        "Factura": factura_letra or "",
-                        "CbteTipo": cbte_tipo,
-                        "PtoVta": pto_vta,
-                        "CbteNro": cbte_nro,
-                        "CbteFch": cbte_fch_yyyymmdd,
-                        "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else "",
-                        "CuitEmisor": cuit_emisor,
-                        "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
-                        "DocNroRec": doc_nro_rec or "",
-                        "AFIP": "OK" if afip_ok else "NO_CONSTA",
-                        "Detalle AFIP": f"WSCDC Resultado={resultado}",
-                    })
+                    out_rows.append(
+                        {
+                            "Archivo": f.filename,
+                            "CAE": cae_pdf or "",
+                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Estado": " | ".join(status),
+                            "Factura": factura_letra or "",
+                            "CbteTipo": cbte_tipo,
+                            "PtoVta": pto_vta,
+                            "CbteNro": cbte_nro,
+                            "CbteFch": cbte_fch_yyyymmdd,
+                            "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else "",
+                            "CuitEmisor": cuit_emisor,
+                            "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
+                            "DocNroRec": doc_nro_rec or "",
+                            "AFIP": "OK" if afip_ok else "NO_CONSTA",
+                            "Detalle AFIP": f"WSCDC Resultado={resultado}",
+                        }
+                    )
                 else:
-                    out_rows.append({
-                        "Archivo": f.filename,
-                        "CAE": cae_pdf or "",
-                        "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
-                        "Estado": " | ".join(status),
-                        "Factura": factura_letra or "",
-                        "CbteTipo": cbte_tipo,
-                        "PtoVta": pto_vta,
-                        "CbteNro": cbte_nro,
-                        "CbteFch": cbte_fch_yyyymmdd,
-                        "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else "",
-                        "CuitEmisor": cuit_emisor,
-                        "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
-                        "DocNroRec": doc_nro_rec or "",
-                        "AFIP": "OK_HTTP",
-                        "Detalle AFIP": "WSCDC respondió 200. No se detectó campo 'Resultado' (revisar parse).",
-                    })
+                    out_rows.append(
+                        {
+                            "Archivo": f.filename,
+                            "CAE": cae_pdf or "",
+                            "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                            "Estado": " | ".join(status),
+                            "Factura": factura_letra or "",
+                            "CbteTipo": cbte_tipo,
+                            "PtoVta": pto_vta,
+                            "CbteNro": cbte_nro,
+                            "CbteFch": cbte_fch_yyyymmdd,
+                            "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else "",
+                            "CuitEmisor": cuit_emisor,
+                            "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
+                            "DocNroRec": doc_nro_rec or "",
+                            "AFIP": "OK_HTTP",
+                            "Detalle AFIP": "WSCDC respondió 200. No se detectó campo 'Resultado' (revisar parse).",
+                        }
+                    )
 
             except Exception as e:
-                out_rows.append({
-                    "Archivo": f.filename,
-                    "CAE": cae_pdf or "",
-                    "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
-                    "Estado": " | ".join(status),
-                    "Factura": factura_letra or "",
-                    "CbteTipo": cbte_tipo,
-                    "PtoVta": pto_vta,
-                    "CbteNro": cbte_nro,
-                    "CbteFch": cbte_fch_yyyymmdd,
-                    "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else (total_raw or ""),
-                    "CuitEmisor": cuit_emisor or "",
-                    "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
-                    "DocNroRec": doc_nro_rec or "",
-                    "AFIP": "ERROR_AFIP",
-                    "Detalle AFIP": str(e)[:2000],
-                })
+                out_rows.append(
+                    {
+                        "Archivo": f.filename,
+                        "CAE": cae_pdf or "",
+                        "Vto CAE": vto_pdf.strftime("%d/%m/%Y") if vto_pdf else "",
+                        "Estado": " | ".join(status),
+                        "Factura": factura_letra or "",
+                        "CbteTipo": cbte_tipo,
+                        "PtoVta": pto_vta,
+                        "CbteNro": cbte_nro,
+                        "CbteFch": cbte_fch_yyyymmdd,
+                        "ImpTotal": f"{imp_total:.2f}" if imp_total is not None else (total_raw or ""),
+                        "CuitEmisor": cuit_emisor or "",
+                        "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
+                        "DocNroRec": doc_nro_rec or "",
+                        "AFIP": "ERROR_AFIP",
+                        "Detalle AFIP": str(e)[:2000],
+                    }
+                )
 
         except Exception as e:
-            out_rows.append({
-                "Archivo": f.filename,
-                "CAE": "",
-                "Vto CAE": "",
-                "Estado": f"Error procesando PDF: {e}",
-                "Factura": "",
-                "CbteTipo": "",
-                "PtoVta": "",
-                "CbteNro": "",
-                "CbteFch": "",
-                "ImpTotal": "",
-                "CuitEmisor": "",
-                "DocTipoRec": "",
-                "DocNroRec": "",
-                "AFIP": "ERROR",
-                "Detalle AFIP": str(e)[:1200],
-            })
+            out_rows.append(
+                {
+                    "Archivo": f.filename,
+                    "CAE": "",
+                    "Vto CAE": "",
+                    "Estado": f"Error procesando PDF: {e}",
+                    "Factura": "",
+                    "CbteTipo": "",
+                    "PtoVta": "",
+                    "CbteNro": "",
+                    "CbteFch": "",
+                    "ImpTotal": "",
+                    "CuitEmisor": "",
+                    "DocTipoRec": "",
+                    "DocNroRec": "",
+                    "AFIP": "ERROR",
+                    "Detalle AFIP": str(e)[:1200],
+                }
+            )
 
     return {"rows": out_rows}
