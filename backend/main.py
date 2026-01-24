@@ -6,8 +6,6 @@ import subprocess
 import tempfile
 import threading
 import sqlite3
-import smtplib
-from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 import xml.etree.ElementTree as ET
@@ -36,7 +34,7 @@ app = FastAPI(title="Verificador CAE Backend", version="1.0.0")
 MAXI_CUIT = os.getenv("MAXI_CUIT", "")
 MAXI_PASSWORD = os.getenv("MAXI_PASSWORD", "")
 BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "")
-DEMO_ACCESS_TOKEN = os.getenv("DEMO_ACCESS_TOKEN", "DEMO_TOKEN_OK")
+DEMO_ACCESS_TOKEN = os.getenv("DEMO_ACCESS_TOKEN", "DEMO_TOKEN_OK")  # producción: token largo por env
 
 
 class LoginRequest(BaseModel):
@@ -74,28 +72,28 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 # ============================================================
 # USAGE COUNTER (SQLite en Render Disk)
 # ============================================================
-# Recomendado en Render:
-# SQLITE_PATH=/var/data/usage.db  (si montás Render Disk en /var/data)
 SQLITE_PATH = os.getenv("SQLITE_PATH", "usage.db").strip()
 _DB_LOCK = threading.Lock()
 
-# Email settings (SMTP Gmail)
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587").strip())
-SMTP_USER = os.getenv("SMTP_USER", "").strip()
-SMTP_PASS = os.getenv("SMTP_PASS", "").strip()  # App Password de Gmail
-SMTP_FROM = os.getenv("SMTP_FROM", "").strip()  # Ej: "Verificador CAE <tu@gmail.com>"
-CLIENT_REPORT_EMAIL = os.getenv("CLIENT_REPORT_EMAIL", "").strip()
-APP_NAME = os.getenv("APP_NAME", "Verificador CAE").strip()
+
+def _ensure_sqlite_dir():
+    d = os.path.dirname(SQLITE_PATH)
+    if d:
+        os.makedirs(d, exist_ok=True)
 
 
 def _year_month_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
+def _sqlite_connect():
+    _ensure_sqlite_dir()
+    # timeout para mitigar "database is locked" bajo carga
+    return sqlite3.connect(SQLITE_PATH, timeout=30)
+
+
 def _sqlite_init():
-    # Crea tabla si no existe
-    with sqlite3.connect(SQLITE_PATH) as con:
+    with _sqlite_connect() as con:
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_monthly (
@@ -112,7 +110,7 @@ def _sqlite_init():
 def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
     _sqlite_init()
     now_iso = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(SQLITE_PATH) as con:
+    with _sqlite_connect() as con:
         con.execute(
             """
             INSERT INTO usage_monthly (year_month, files_count, requests_count, updated_at)
@@ -129,16 +127,14 @@ def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
 
 def _sqlite_get(year_month: str) -> Dict[str, Any]:
     _sqlite_init()
-    with sqlite3.connect(SQLITE_PATH) as con:
+    with _sqlite_connect() as con:
         cur = con.execute(
             "SELECT year_month, files_count, requests_count, updated_at FROM usage_monthly WHERE year_month = ?",
             (year_month,),
         )
         row = cur.fetchone()
-
     if not row:
         return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
-
     return {"year_month": row[0], "files_count": int(row[1]), "requests_count": int(row[2]), "updated_at": row[3]}
 
 
@@ -155,49 +151,61 @@ def usage_current() -> Dict[str, Any]:
         return _sqlite_get(ym)
 
 
-def _send_usage_email(payload: Dict[str, Any]) -> None:
-    if not CLIENT_REPORT_EMAIL:
-        raise RuntimeError("Falta CLIENT_REPORT_EMAIL en env vars.")
-    if not SMTP_USER or not SMTP_PASS:
-        raise RuntimeError("Faltan SMTP_USER / SMTP_PASS (App Password) en env vars.")
-
-    msg = EmailMessage()
-    sender = SMTP_FROM if SMTP_FROM else SMTP_USER
-    msg["From"] = sender
-    msg["To"] = CLIENT_REPORT_EMAIL
-    msg["Subject"] = f"[{APP_NAME}] Reporte de uso mensual {payload.get('year_month','')}"
-    body = (
-        f"{APP_NAME} - Reporte de uso mensual\n\n"
-        f"Mes (UTC): {payload.get('year_month')}\n"
-        f"Requests: {payload.get('requests_count')}\n"
-        f"Archivos procesados: {payload.get('files_count')}\n"
-        f"Última actualización: {payload.get('updated_at')}\n"
-    )
-    msg.set_content(body)
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.send_message(msg)
-
-
-@app.on_event("startup")
-def on_startup():
-    # Inicializa la DB al levantar (así la tabla existe aunque no hayan consultas)
-    try:
-        _sqlite_init()
-    except Exception:
-        # No frenamos el servicio por el contador
-        pass
-
-
 @app.get("/usage/current")
 def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
-    return usage_current()
+    try:
+        return usage_current()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"usage_current error: {type(e).__name__}: {e}")
+
+
+# ============================================================
+# EMAIL (Resend via HTTPS) - evita SMTP bloqueado en Render
+# ============================================================
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "resend").strip().lower()
+
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+# Reutilizamos el nombre de variable que ya venías usando como "From"
+SMTP_FROM = os.getenv("SMTP_FROM", "Verificador CAE <onboarding@resend.dev>").strip()
+CLIENT_REPORT_EMAIL = os.getenv("CLIENT_REPORT_EMAIL", "").strip()
+
+
+def _send_email_via_resend(to_email: str, subject: str, text_body: str, attachments: Optional[List[Dict[str, str]]] = None):
+    """
+    attachments: lista de dicts {filename: str, content_b64: str}
+    """
+    if not RESEND_API_KEY:
+        raise RuntimeError("Falta RESEND_API_KEY en env vars.")
+    if not to_email:
+        raise RuntimeError("Falta CLIENT_REPORT_EMAIL (destinatario fijo por deploy).")
+
+    payload: Dict[str, Any] = {
+        "from": SMTP_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "text": text_body,
+    }
+
+    attachments = attachments or []
+    if attachments:
+        payload["attachments"] = [{"filename": a["filename"], "content": a["content_b64"]} for a in attachments]
+
+    r = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Resend error {r.status_code}: {r.text[:800]}")
+
+
+def send_usage_email(to_email: str, subject: str, body: str, attachments: Optional[List[Dict[str, str]]] = None):
+    if EMAIL_PROVIDER == "resend":
+        return _send_email_via_resend(to_email, subject, body, attachments=attachments)
+    raise RuntimeError(f"EMAIL_PROVIDER no soportado: {EMAIL_PROVIDER}")
 
 
 @app.post("/usage/email")
@@ -205,9 +213,40 @@ def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str
     check_api_key(x_api_key)
     check_bearer(authorization)
 
-    data = usage_current()
-    _send_usage_email(data)
-    return {"ok": True, "sent_to": CLIENT_REPORT_EMAIL, "usage": data}
+    try:
+        data = usage_current()
+        ym = data.get("year_month", "")
+        files_count = int(data.get("files_count", 0) or 0)
+        requests_count = int(data.get("requests_count", 0) or 0)
+
+        subject = f"Resumen mensual Verificador CAE - {ym}"
+        body = (
+            f"Resumen de uso del Verificador CAE correspondiente a {ym}:\n"
+            f"- PDFs procesados: {files_count}\n"
+            f"- Solicitudes realizadas: {requests_count}\n"
+        )
+
+        csv_text = "Mes;PDFs;Requests\n" + f"{ym};{files_count};{requests_count}\n"
+        csv_b64 = base64.b64encode(csv_text.encode("utf-8-sig")).decode("utf-8")
+
+        send_usage_email(
+            to_email=CLIENT_REPORT_EMAIL,
+            subject=subject,
+            body=body,
+            attachments=[{"filename": f"consumo_{ym}.csv", "content_b64": csv_b64}],
+        )
+
+        return {
+            "ok": True,
+            "to": CLIENT_REPORT_EMAIL,
+            "year_month": ym,
+            "files_count": files_count,
+            "requests_count": requests_count,
+        }
+
+    except Exception as e:
+        # IMPORTANTE: no tirar abajo el proceso; devolvemos el error explícito
+        raise HTTPException(status_code=500, detail=f"usage/email error: {type(e).__name__}: {e}")
 
 
 # ============================================================
@@ -355,16 +394,15 @@ def detect_factura_letra(text: str) -> Optional[str]:
 
 
 def extract_all_cuits(text: str) -> List[str]:
-    cuits = []
+    cuits: List[str] = []
     for m in CUIT_AFTER_LABEL_RE.finditer(text):
         cuits.append(m.group(1))
-
     if not cuits:
         for m in CUIT_ANY_11_RE.finditer(text):
             cuits.append(m.group(1))
 
     seen = set()
-    out = []
+    out: List[str] = []
     for c in cuits:
         if c not in seen:
             seen.add(c)
@@ -373,10 +411,9 @@ def extract_all_cuits(text: str) -> List[str]:
 
 
 def decide_cuit_emisor(text: str) -> Optional[str]:
+    # Heurística: el primer CUIT suele ser el emisor (encabezado)
     cuits = extract_all_cuits(text)
-    if cuits:
-        return cuits[0]
-    return None
+    return cuits[0] if cuits else None
 
 
 def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Optional[str]]:
@@ -386,11 +423,11 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
     for c in cuits:
         if cuit_emisor and c == cuit_emisor:
             continue
-        return 80, c
+        return 80, c  # CUIT receptor
 
     dni = find_first([DNI_RE], text)
     if dni:
-        return 96, dni
+        return 96, dni  # DNI receptor
 
     return None, None
 
@@ -399,7 +436,9 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
-AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()  # CUIT consultante (cert)
+
+# CUIT consultante (Auth.Cuit) => debe ser el TUYO y debe matchear cert
+AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
 
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
 AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
@@ -414,8 +453,11 @@ WSCDC_URLS = {
     "homo": "https://wswhomo.afip.gob.ar/WSCDC/service.asmx",
 }
 
+# WSCDC requiere SOAPAction válido (si no, fault "valid action parameter").
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
 WSCDC_SOAP_ACTION = os.getenv("WSCDC_SOAP_ACTION", "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar").strip()
+
+# Namespace real WSCDC
 WSCDC_NS = os.getenv("WSCDC_NS", "http://servicios1.afip.gob.ar/wscdc/").strip()
 
 
@@ -432,6 +474,9 @@ def b64_to_bytes(s: str) -> bytes:
     return base64.b64decode(s.encode("utf-8"))
 
 
+# ============================================================
+# TLS FIX: bajar SECLEVEL solo para AFIP (DH_KEY_TOO_SMALL)
+# ============================================================
 class AfipTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
         ctx = ssl.create_default_context()
@@ -447,6 +492,9 @@ AFIP_SESSION.mount("https://servicios1.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
 
 
+# ============================================================
+# WSAA cache (token+sign)
+# ============================================================
 _TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
 
 
@@ -652,6 +700,7 @@ def wscdc_comprobante_constatar(
 
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
+        # Importante: SOAPAction con comillas
         "SOAPAction": f"\"{WSCDC_SOAP_ACTION}\"",
     }
 
@@ -717,7 +766,7 @@ async def verify(
             cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
             cbte_fch_yyyymmdd = date_to_yyyymmdd(cbte_fch)
 
-            # CUIT EMISOR = DEL PDF
+            # CUIT EMISOR = del PDF (no el tuyo)
             cuit_emisor = decide_cuit_emisor(text)
 
             # Receptor: auto-detección (si hay 2 CUITs, toma el que no es emisor)
@@ -736,7 +785,7 @@ async def verify(
             if factura_letra:
                 status.append(f"Factura {factura_letra}")
 
-            # Reglas automáticas A/B/C
+            # Regla automática A/B/C
             require_receptor = (factura_letra == "A")
 
             missing = []
@@ -798,7 +847,7 @@ async def verify(
 
                 resultado = (res.get("resultado") or "").strip()
                 if resultado:
-                    # AFIP: A = aprobado/ok. R = rechazado.
+                    # AFIP: A = Aprobado, R = Rechazado
                     afip_ok = resultado.upper() in ("A", "OK", "APROBADO")
                     out_rows.append(
                         {
