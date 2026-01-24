@@ -6,7 +6,6 @@ import subprocess
 import tempfile
 import threading
 import sqlite3
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 import xml.etree.ElementTree as ET
@@ -21,13 +20,6 @@ from urllib3.poolmanager import PoolManager
 
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
-logger = logging.getLogger("verificador-cae")
 
 
 # ============================================================
@@ -78,17 +70,16 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 
 
 # ============================================================
-# USAGE COUNTER (Neon Postgres preferred, SQLite fallback)
+# USAGE COUNTER (Neon/Postgres preferred, SQLite fallback)
 # ============================================================
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Neon/Postgres
 SQLITE_PATH = os.getenv("SQLITE_PATH", "usage.db").strip()
-
-# En PROD recomendable: no fallback silencioso.
-# - USAGE_FALLBACK_SQLITE=1 -> permite fallback a SQLite si Postgres falla
-USAGE_FALLBACK_SQLITE = os.getenv("USAGE_FALLBACK_SQLITE", "0").strip() in ("1", "true", "True", "YES", "yes")
-
 _DB_LOCK = threading.Lock()
-_PG_READY = False  # cache simple: si init ok una vez
+
+
+def _log(msg: str):
+    # Render captura stdout -> logs
+    print(f"[USAGE] {msg}", flush=True)
 
 
 def _is_postgres(dsn: str) -> bool:
@@ -115,8 +106,8 @@ def _sqlite_init():
 
 
 def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
-    now_iso = datetime.now(timezone.utc).isoformat()
     _sqlite_init()
+    now_iso = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -141,29 +132,18 @@ def _sqlite_get(year_month: str) -> Dict[str, Any]:
         )
         row = cur.fetchone()
     if not row:
-        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None, "storage": "sqlite"}
-    return {
-        "year_month": row[0],
-        "files_count": int(row[1]),
-        "requests_count": int(row[2]),
-        "updated_at": row[3],
-        "storage": "sqlite",
-    }
-
-
-def _pg_connect():
-    # Import lazy para no romper arranque si no está instalado
-    import psycopg
-
-    # Neon requiere SSL; normalmente ya viene en el string.
-    return psycopg.connect(DATABASE_URL)
+        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
+    return {"year_month": row[0], "files_count": int(row[1]), "requests_count": int(row[2]), "updated_at": row[3]}
 
 
 def _pg_init():
-    global _PG_READY
-    if _PG_READY:
-        return
-    with _pg_connect() as con:
+    """
+    Crea la tabla en Postgres (Neon) si no existe.
+    IMPORTANTE: esto tiene que ejecutarse ANTES del primer INSERT.
+    """
+    import psycopg
+
+    with psycopg.connect(DATABASE_URL, connect_timeout=10) as con:
         with con.cursor() as cur:
             cur.execute(
                 """
@@ -176,13 +156,13 @@ def _pg_init():
                 """
             )
         con.commit()
-    _PG_READY = True
 
 
 def _pg_upsert(year_month: str, files_delta: int, requests_delta: int):
+    import psycopg
+
     now = datetime.now(timezone.utc)
-    _pg_init()
-    with _pg_connect() as con:
+    with psycopg.connect(DATABASE_URL, connect_timeout=10) as con:
         with con.cursor() as cur:
             cur.execute(
                 """
@@ -199,22 +179,24 @@ def _pg_upsert(year_month: str, files_delta: int, requests_delta: int):
 
 
 def _pg_get(year_month: str) -> Dict[str, Any]:
-    _pg_init()
-    with _pg_connect() as con:
+    import psycopg
+
+    with psycopg.connect(DATABASE_URL, connect_timeout=10) as con:
         with con.cursor() as cur:
             cur.execute(
                 "SELECT year_month, files_count, requests_count, updated_at FROM public.usage_monthly WHERE year_month = %s",
                 (year_month,),
             )
             row = cur.fetchone()
+
     if not row:
-        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None, "storage": "postgres"}
+        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
+
     return {
         "year_month": row[0],
         "files_count": int(row[1]),
         "requests_count": int(row[2]),
         "updated_at": str(row[3]) if row[3] is not None else None,
-        "storage": "postgres",
     }
 
 
@@ -223,15 +205,16 @@ def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]
     with _DB_LOCK:
         if DATABASE_URL and _is_postgres(DATABASE_URL):
             try:
+                # CLAVE: crear tabla antes del primer INSERT
+                _pg_init()
                 _pg_upsert(ym, files_delta, requests_delta)
                 return _pg_get(ym)
             except Exception as e:
-                logger.exception("Postgres usage_increment failed. Error: %s", e)
-                if USAGE_FALLBACK_SQLITE:
-                    _sqlite_upsert(ym, files_delta, requests_delta)
-                    return _sqlite_get(ym)
-                raise
-        # No Postgres configurado -> SQLite
+                _log(f"Postgres FAIL -> fallback SQLite. Error: {type(e).__name__}: {e}")
+                _sqlite_upsert(ym, files_delta, requests_delta)
+                return _sqlite_get(ym)
+
+        # Sin DATABASE_URL => SQLite
         _sqlite_upsert(ym, files_delta, requests_delta)
         return _sqlite_get(ym)
 
@@ -241,13 +224,29 @@ def usage_current() -> Dict[str, Any]:
     with _DB_LOCK:
         if DATABASE_URL and _is_postgres(DATABASE_URL):
             try:
+                _pg_init()
                 return _pg_get(ym)
             except Exception as e:
-                logger.exception("Postgres usage_current failed. Error: %s", e)
-                if USAGE_FALLBACK_SQLITE:
-                    return _sqlite_get(ym)
-                raise
+                _log(f"Postgres FAIL en usage_current -> SQLite. Error: {type(e).__name__}: {e}")
+                return _sqlite_get(ym)
         return _sqlite_get(ym)
+
+
+@app.on_event("startup")
+def _startup_init_db():
+    # Intento de init temprano para que la tabla exista apenas levanta el servicio
+    if DATABASE_URL and _is_postgres(DATABASE_URL):
+        try:
+            _pg_init()
+            _log("Postgres OK: tabla public.usage_monthly verificada/creada en startup.")
+        except Exception as e:
+            _log(f"Postgres init FAIL en startup (seguimos con fallback): {type(e).__name__}: {e}")
+    else:
+        try:
+            _sqlite_init()
+            _log("SQLite OK: usage.db inicializada en startup.")
+        except Exception as e:
+            _log(f"SQLite init FAIL en startup: {type(e).__name__}: {e}")
 
 
 @app.get("/usage/current")
@@ -255,51 +254,6 @@ def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: s
     check_api_key(x_api_key)
     check_bearer(authorization)
     return usage_current()
-
-
-@app.get("/usage/diag")
-def usage_diag_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
-    """
-    Diagnóstico explícito para Neon/Postgres:
-    - confirma que DATABASE_URL está seteada y es postgres
-    - intenta conectar
-    - ejecuta CREATE TABLE
-    - ejecuta SELECT now()
-    """
-    check_api_key(x_api_key)
-    check_bearer(authorization)
-
-    diag: Dict[str, Any] = {
-        "DATABASE_URL_set": bool(DATABASE_URL),
-        "DATABASE_URL_is_postgres": _is_postgres(DATABASE_URL) if DATABASE_URL else False,
-        "USAGE_FALLBACK_SQLITE": USAGE_FALLBACK_SQLITE,
-        "pg_ready_cached": _PG_READY,
-    }
-
-    if not (DATABASE_URL and _is_postgres(DATABASE_URL)):
-        diag["status"] = "no_postgres_configured"
-        return diag
-
-    try:
-        # Connect + now()
-        with _pg_connect() as con:
-            with con.cursor() as cur:
-                cur.execute("select now()")
-                diag["pg_now"] = str(cur.fetchone()[0])
-
-        # init table
-        _pg_init()
-        diag["pg_init"] = "ok"
-
-        # roundtrip select
-        diag["sample_row"] = _pg_get(_year_month_utc())
-        diag["status"] = "ok"
-        return diag
-
-    except Exception as e:
-        diag["status"] = "error"
-        diag["error"] = str(e)[:1500]
-        return diag
 
 
 # ============================================================
@@ -323,35 +277,28 @@ VTO_PATTERNS = [
     ),
 ]
 
-# "A COD. 01" / "COD. 01"
 CBTETIPO_PATTERNS = [
     re.compile(r"\bCOD\.?\s*(\d{1,3})\b", re.IGNORECASE),
     re.compile(r"\bC[oó]digo\s*(\d{1,3})\b", re.IGNORECASE),
 ]
 
-# "Punto de Venta: 00001"
 PTOVTA_PATTERNS = [
     re.compile(r"\bPunto\s+de\s+Venta:?\s*(\d{1,5})\b", re.IGNORECASE),
     re.compile(r"\bPto\.?\s*Vta\.?:?\s*(\d{1,5})\b", re.IGNORECASE),
-    # fallback: 00001-00000061
     re.compile(r"\b(\d{4,5})\s*[-/]\s*(\d{6,10})\b"),
 ]
 
-# "Comp. Nro: 00000061"
 CBTENRO_PATTERNS = [
     re.compile(r"\bComp\.?\s*Nro:?\s*(\d{1,12})\b", re.IGNORECASE),
     re.compile(r"\bComprobante\s*N[º°o]?:?\s*(\d{1,12})\b", re.IGNORECASE),
-    # fallback: 00001-00000061
     re.compile(r"\b(\d{4,5})\s*[-/]\s*(\d{6,10})\b"),
 ]
 
-# "Fecha de Emisión: 21/01/2026"
 CBTEFCH_PATTERNS = [
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{2}[/-]\d{2}[/-]\d{4})\b", re.IGNORECASE),
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{4}[/-]\d{2}[/-]\d{2})\b", re.IGNORECASE),
 ]
 
-# TOTAL / IMPORTE TOTAL (necesario para WSCDC en muchos casos)
 TOTAL_PATTERNS = [
     re.compile(
         r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|IMPORTE\s+FINAL|TOTAL)\b\D{0,60}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
@@ -363,18 +310,14 @@ TOTAL_PATTERNS = [
     ),
 ]
 
-# Factura A/B/C (por texto típico en PDF)
 FACTURA_TIPO_PATTERNS = [
     re.compile(r"\bA\s+FACTURA\b", re.IGNORECASE),
     re.compile(r"\bB\s+FACTURA\b", re.IGNORECASE),
     re.compile(r"\bC\s+FACTURA\b", re.IGNORECASE),
 ]
 
-# CUITs
 CUIT_AFTER_LABEL_RE = re.compile(r"\bCUIT:\s*([0-9]{11})\b", re.IGNORECASE)
 CUIT_ANY_11_RE = re.compile(r"\b([0-9]{11})\b")
-
-# DNI (si aparece; opcional)
 DNI_RE = re.compile(r"\bDNI\b\D{0,20}(\d{7,8})\b", re.IGNORECASE)
 
 
@@ -437,9 +380,6 @@ def date_to_yyyymmdd(d) -> Optional[str]:
 
 
 def normalize_amount_ar_to_float(s: Optional[str]) -> Optional[float]:
-    """
-    Convierte strings tipo '1.234,56' o '1234,56' o '1234.56' a float.
-    """
     if not s:
         return None
     x = s.strip().replace(" ", "")
@@ -453,9 +393,6 @@ def normalize_amount_ar_to_float(s: Optional[str]) -> Optional[float]:
 
 
 def detect_factura_letra(text: str) -> Optional[str]:
-    """
-    Devuelve 'A' / 'B' / 'C' si lo detecta por texto tipo 'A FACTURA'.
-    """
     for pat in FACTURA_TIPO_PATTERNS:
         m = pat.search(text)
         if m:
@@ -464,9 +401,6 @@ def detect_factura_letra(text: str) -> Optional[str]:
 
 
 def extract_all_cuits(text: str) -> List[str]:
-    """
-    Extrae CUITs de 11 dígitos. Priorizamos los que aparecen explícitamente como 'CUIT:'.
-    """
     cuits = []
     for m in CUIT_AFTER_LABEL_RE.finditer(text):
         cuits.append(m.group(1))
@@ -475,7 +409,6 @@ def extract_all_cuits(text: str) -> List[str]:
         for m in CUIT_ANY_11_RE.finditer(text):
             cuits.append(m.group(1))
 
-    # unique preservando orden
     seen = set()
     out = []
     for c in cuits:
@@ -486,9 +419,6 @@ def extract_all_cuits(text: str) -> List[str]:
 
 
 def decide_cuit_emisor(text: str) -> Optional[str]:
-    """
-    Heurística: típicamente el primer CUIT visible en la factura es el del EMISOR.
-    """
     cuits = extract_all_cuits(text)
     if cuits:
         return cuits[0]
@@ -496,12 +426,6 @@ def decide_cuit_emisor(text: str) -> Optional[str]:
 
 
 def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Optional[str]]:
-    """
-    Devuelve (DocTipoReceptor, DocNroReceptor).
-    - Si encuentra un CUIT distinto al emisor: DocTipo=80 y DocNro = ese CUIT.
-    - Si no, intenta DNI: DocTipo=96 y DocNro = DNI.
-    - Si no hay nada: None, None.
-    """
     cuit_emisor = (cuit_emisor or "").strip()
     cuits = extract_all_cuits(text)
 
@@ -521,10 +445,7 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
-
-# IMPORTANTE:
-# - Este CUIT es el "consultante" (Auth.Cuit), debe ser el tuyo y debe matchear el cert.
-AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
+AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()  # CUIT consultante (cert)
 
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
 AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
@@ -540,14 +461,10 @@ WSCDC_URLS = {
 }
 
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
-
-# WSCDC requiere SOAPAction válido (si no, fault "valid action parameter").
 WSCDC_SOAP_ACTION = os.getenv(
     "WSCDC_SOAP_ACTION",
     "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
 ).strip()
-
-# Namespace real del servicio WSCDC
 WSCDC_NS = os.getenv(
     "WSCDC_NS",
     "http://servicios1.afip.gob.ar/wscdc/",
@@ -668,19 +585,12 @@ def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> byte
             f.write(tra_xml.encode("utf-8"))
 
         cmd = [
-            "openssl",
-            "smime",
-            "-sign",
-            "-signer",
-            cert_path,
-            "-inkey",
-            key_path,
-            "-in",
-            tra_path,
-            "-out",
-            out_path,
-            "-outform",
-            "DER",
+            "openssl", "smime", "-sign",
+            "-signer", cert_path,
+            "-inkey", key_path,
+            "-in", tra_path,
+            "-out", out_path,
+            "-outform", "DER",
             "-nodetach",
             "-binary",
         ]
@@ -714,7 +624,7 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
-    headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": WSAA_SOAP_ACTION or "loginCms"}
+    headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "loginCms"}
 
     r = AFIP_SESSION.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
     if r.status_code != 200:
@@ -827,9 +737,9 @@ async def verify(
     # Contador mensual (cliente por deploy): suma por request y por cantidad de archivos
     try:
         usage_increment(files_delta=len(files), requests_delta=1)
-    except Exception as e:
-        # No frenamos la validación AFIP por un tema de métricas, pero LOGUEAMOS.
-        logger.exception("usage_increment failed (metrics only). Error: %s", e)
+    except Exception:
+        # No frenamos la validación AFIP por un tema de métricas
+        pass
 
     today = datetime.now().date()
     out_rows: List[Dict[str, Any]] = []
