@@ -3,6 +3,8 @@ import io
 import re
 import base64
 import subprocess
+import threading
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 import xml.etree.ElementTree as ET
@@ -68,6 +70,78 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 
 
 # ============================================================
+# USAGE COUNTER (SQLite, por deploy)
+# ============================================================
+SQLITE_PATH = os.getenv("SQLITE_PATH", "usage.db").strip()
+_DB_LOCK = threading.Lock()
+
+
+def _get_year_month_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _db_init_sqlite():
+    with sqlite3.connect(SQLITE_PATH) as con:
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS usage_monthly (
+            year_month TEXT PRIMARY KEY,
+            files_count INTEGER NOT NULL DEFAULT 0,
+            requests_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        """)
+        con.commit()
+
+
+def _db_upsert_sqlite(year_month: str, files_delta: int, requests_delta: int):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(SQLITE_PATH) as con:
+        con.execute("""
+        INSERT INTO usage_monthly (year_month, files_count, requests_count, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(year_month) DO UPDATE SET
+            files_count = files_count + excluded.files_count,
+            requests_count = requests_count + excluded.requests_count,
+            updated_at = excluded.updated_at;
+        """, (year_month, int(files_delta), int(requests_delta), now_iso))
+        con.commit()
+
+
+def _db_get_sqlite(year_month: str) -> Dict[str, Any]:
+    _db_init_sqlite()
+    with sqlite3.connect(SQLITE_PATH) as con:
+        cur = con.execute(
+            "SELECT year_month, files_count, requests_count, updated_at FROM usage_monthly WHERE year_month = ?",
+            (year_month,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
+    return {"year_month": row[0], "files_count": int(row[1]), "requests_count": int(row[2]), "updated_at": row[3]}
+
+
+def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]:
+    ym = _get_year_month_utc()
+    with _DB_LOCK:
+        _db_init_sqlite()
+        _db_upsert_sqlite(ym, files_delta=files_delta, requests_delta=requests_delta)
+        return _db_get_sqlite(ym)
+
+
+def usage_current() -> Dict[str, Any]:
+    ym = _get_year_month_utc()
+    with _DB_LOCK:
+        return _db_get_sqlite(ym)
+
+
+@app.get("/usage/current")
+def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+    return usage_current()
+
+
+# ============================================================
 # PDF EXTRACTION
 # ============================================================
 CAE_PATTERNS = [
@@ -116,7 +190,7 @@ CBTEFCH_PATTERNS = [
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{4}[/-]\d{2}[/-]\d{2})\b", re.IGNORECASE),
 ]
 
-# TOTAL / IMPORTE TOTAL (necesario para WSCDC en muchos casos)
+# TOTAL / IMPORTE TOTAL (necesario para WSCDC)
 TOTAL_PATTERNS = [
     re.compile(
         r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|IMPORTE\s+FINAL|TOTAL)\b\D{0,60}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
@@ -128,7 +202,7 @@ TOTAL_PATTERNS = [
     ),
 ]
 
-# Factura A/B/C (por texto típico en PDF)
+# Factura A/B/C
 FACTURA_TIPO_PATTERNS = [
     re.compile(r"\bA\s+FACTURA\b", re.IGNORECASE),
     re.compile(r"\bB\s+FACTURA\b", re.IGNORECASE),
@@ -139,7 +213,7 @@ FACTURA_TIPO_PATTERNS = [
 CUIT_AFTER_LABEL_RE = re.compile(r"\bCUIT:\s*([0-9]{11})\b", re.IGNORECASE)
 CUIT_ANY_11_RE = re.compile(r"\b([0-9]{11})\b")
 
-# DNI (si aparece; opcional)
+# DNI (opcional)
 DNI_RE = re.compile(r"\bDNI\b\D{0,20}(\d{7,8})\b", re.IGNORECASE)
 
 
@@ -163,7 +237,7 @@ def find_ptovta(text: str) -> Optional[str]:
     for pat in PTOVTA_PATTERNS:
         m = pat.search(text)
         if m:
-            if m.lastindex == 2:  # 00001-00000061
+            if m.lastindex == 2:
                 return m.group(1)
             return m.group(1)
     return None
@@ -173,7 +247,7 @@ def find_cbtenro(text: str) -> Optional[str]:
     for pat in CBTENRO_PATTERNS:
         m = pat.search(text)
         if m:
-            if m.lastindex == 2:  # 00001-00000061
+            if m.lastindex == 2:
                 return m.group(2)
             return m.group(1)
     return None
@@ -240,7 +314,6 @@ def extract_all_cuits(text: str) -> List[str]:
         for m in CUIT_ANY_11_RE.finditer(text):
             cuits.append(m.group(1))
 
-    # unique preservando orden
     seen = set()
     out = []
     for c in cuits:
@@ -251,11 +324,6 @@ def extract_all_cuits(text: str) -> List[str]:
 
 
 def decide_cuit_emisor(text: str) -> Optional[str]:
-    """
-    Heurística: en PDFs de facturas AFIP, típicamente el primer CUIT que aparece
-    corresponde al EMISOR (encabezado), y luego aparece el CUIT del receptor.
-    Para evitar romper, devolvemos el primero y listo.
-    """
     cuits = extract_all_cuits(text)
     if cuits:
         return cuits[0]
@@ -267,7 +335,6 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
     Devuelve (DocTipoReceptor, DocNroReceptor).
     - Si encuentra un CUIT distinto al emisor: DocTipo=80 y DocNro = ese CUIT.
     - Si no, intenta DNI: DocTipo=96 y DocNro = DNI.
-    - Si no hay nada: None, None.
     """
     cuit_emisor = (cuit_emisor or "").strip()
     cuits = extract_all_cuits(text)
@@ -289,8 +356,7 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
 
-# IMPORTANTE:
-# - Este CUIT es el "consultante" (Auth.Cuit), debe ser el tuyo y debe matchear el cert.
+# CUIT consultante (Auth.Cuit), debe ser el tuyo y matchear el cert.
 AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
 
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
@@ -308,13 +374,11 @@ WSCDC_URLS = {
 
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
 
-# WSCDC requiere SOAPAction válido (si no, fault "valid action parameter").
 WSCDC_SOAP_ACTION = os.getenv(
     "WSCDC_SOAP_ACTION",
     "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
 ).strip()
 
-# Namespace real del servicio WSCDC
 WSCDC_NS = os.getenv(
     "WSCDC_NS",
     "http://servicios1.afip.gob.ar/wscdc/",
@@ -572,7 +636,7 @@ def wscdc_comprobante_constatar(
 
 
 # ============================================================
-# VERIFY ENDPOINT (PROD)
+# VERIFY ENDPOINT
 # ============================================================
 @app.post("/verify")
 async def verify(
@@ -583,6 +647,13 @@ async def verify(
     check_api_key(x_api_key)
     check_bearer(authorization)
     require_afip_env()
+
+    # Contador mensual (por deploy)
+    try:
+        usage_increment(files_delta=len(files), requests_delta=1)
+    except Exception:
+        # No frenamos la validación si el contador falla
+        pass
 
     today = datetime.now().date()
     out_rows: List[Dict[str, Any]] = []
@@ -611,12 +682,10 @@ async def verify(
             cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
             cbte_fch_yyyymmdd = date_to_yyyymmdd(cbte_fch)
 
-            # ================================
-            # CLAVE: CUIT EMISOR = DEL PDF
-            # ================================
+            # CUIT EMISOR = DEL PDF
             cuit_emisor = decide_cuit_emisor(text)
 
-            # Receptor: auto-detección (si hay 2 CUITs, toma el que no es emisor)
+            # Receptor: auto-detección
             doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor or "")
 
             status = []

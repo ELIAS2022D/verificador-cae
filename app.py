@@ -3,6 +3,8 @@ import zipfile
 import re
 from datetime import datetime
 from pathlib import Path
+import smtplib
+from email.message import EmailMessage
 
 import pandas as pd
 import streamlit as st
@@ -16,6 +18,32 @@ st.title("Verificador de CAE")
 BASE_URL = st.secrets.get("BASE_URL", "")
 DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
 LOGIN_CUIT_DEFAULT = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
+
+# Límite opcional por seguridad (si está vacío o no existe => ilimitado)
+MAX_FILES_RAW = st.secrets.get("MAX_FILES", None)
+BATCH_SIZE = int(st.secrets.get("BATCH_SIZE", 50))
+
+# Email fijo por secrets (cliente por deploy)
+CLIENT_EMAIL_TO = st.secrets.get("CLIENT_EMAIL_TO", "")
+CLIENT_NAME = st.secrets.get("CLIENT_NAME", "Cliente")
+
+# SMTP Gmail (App Password)
+SMTP_HOST = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(st.secrets.get("SMTP_PORT", 587))
+SMTP_USER = st.secrets.get("SMTP_USER", "")
+SMTP_APP_PASSWORD = st.secrets.get("SMTP_APP_PASSWORD", "")
+
+def _parse_int_or_none(x):
+    try:
+        if x is None:
+            return None
+        if isinstance(x, str) and x.strip() == "":
+            return None
+        return int(x)
+    except Exception:
+        return None
+
+MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
 
 if not BASE_URL:
     st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
@@ -102,7 +130,7 @@ def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
         raise RuntimeError("Login OK pero el backend no devolvió access_token.")
     return token
 
-def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: list):
+def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: list, timeout_s: int = 180):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
         headers["X-API-Key"] = api_key
@@ -113,11 +141,50 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
         f"{base_url}/verify",
         headers=headers,
         files=files,
-        timeout=180,
+        timeout=timeout_s,
     )
     if r.status_code != 200:
         raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
     return r.json()
+
+def backend_usage_current(base_url: str, api_key: str, access_token: str):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    r = requests.get(f"{base_url}/usage/current", headers=headers, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Usage falló ({r.status_code}): {r.text}")
+    return r.json()
+
+def chunk_list(items, size: int):
+    if size <= 0:
+        return [items]
+    return [items[i:i+size] for i in range(0, len(items), size)]
+
+# ===================== EMAIL (GMAIL SMTP) =====================
+def send_gmail_report(to_email: str, subject: str, body: str, attachments: list = None):
+    if not SMTP_USER or not SMTP_APP_PASSWORD:
+        raise RuntimeError("Faltan SMTP_USER / SMTP_APP_PASSWORD en Secrets (Gmail SMTP).")
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_USER
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    attachments = attachments or []
+    for att in attachments:
+        mime = att.get("mime", "application/octet-stream")
+        if "/" in mime:
+            maintype, subtype = mime.split("/", 1)
+        else:
+            maintype, subtype = "application", "octet-stream"
+        msg.add_attachment(att["bytes"], maintype=maintype, subtype=subtype, filename=att["filename"])
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_APP_PASSWORD)
+        server.send_message(msg)
 
 # ===================== SIDEBAR: LOGIN =====================
 with st.sidebar:
@@ -153,7 +220,7 @@ with st.sidebar:
             }
             st.rerun()
 
-# HERO + STOP si no está logueado
+# STOP si no está logueado
 if not st.session_state.auth["logged"]:
     st.info("Iniciá sesión para habilitar carga y validación.")
     st.stop()
@@ -163,21 +230,79 @@ st.info(
     "La validación AFIP se realiza en backend con credenciales del lado servidor."
 )
 
+# ===================== CONSUMO DEL MES + ENVÍO EMAIL =====================
+st.subheader("Consumo del mes")
+
+try:
+    usage = backend_usage_current(
+        base_url=BASE_URL,
+        api_key=st.session_state.auth["api_key"],
+        access_token=st.session_state.auth["access_token"],
+    )
+    ym = usage.get("year_month", "")
+    files_count = int(usage.get("files_count", 0) or 0)
+    requests_count = int(usage.get("requests_count", 0) or 0)
+
+    colm1, colm2, colm3 = st.columns(3)
+    with colm1:
+        st.metric("PDFs procesados este mes", files_count)
+    with colm2:
+        st.metric("Requests este mes", requests_count)
+    with colm3:
+        st.metric("Mes", ym or "-")
+
+    if st.button("Enviar resumen por Gmail al cliente"):
+        if not CLIENT_EMAIL_TO:
+            st.error("Falta CLIENT_EMAIL_TO en Secrets.")
+        else:
+            df_usage = pd.DataFrame([{
+                "Mes": ym,
+                "PDFs": files_count,
+                "Requests": requests_count,
+                "Fecha reporte": datetime.now().strftime("%d/%m/%Y %H:%M"),
+            }])
+            csv_bytes = df_usage.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+
+            subject = f"Resumen mensual Verificador CAE - {ym}"
+            body = (
+                f"Hola {CLIENT_NAME},\n\n"
+                f"Te comparto el resumen de uso del Verificador CAE correspondiente a {ym}:\n"
+                f"- PDFs procesados: {files_count}\n"
+                f"- Solicitudes realizadas: {requests_count}\n\n"
+                f"Adjunto el reporte en CSV.\n\n"
+                f"Saludos,\n"
+                f"Elías\n"
+            )
+
+            send_gmail_report(
+                to_email=CLIENT_EMAIL_TO,
+                subject=subject,
+                body=body,
+                attachments=[{"filename": f"consumo_{ym}.csv", "bytes": csv_bytes, "mime": "text/csv"}],
+            )
+            st.success(f"Email enviado a {CLIENT_EMAIL_TO}.")
+except Exception as e:
+    st.warning(f"No pude obtener el consumo: {e}")
+
+st.divider()
+
 # ===================== CARGA ARCHIVOS =====================
 st.subheader("Carga de archivos")
-mode = st.radio("Modo de carga", ["PDFs (hasta 20)", "ZIP (contiene PDFs)"], horizontal=True)
+
+help_text = "Ilimitado" if MAX_FILES is None else f"Hasta {MAX_FILES}"
+mode = st.radio("Modo de carga", [f"PDFs ({help_text})", f"ZIP (contiene PDFs) ({help_text})"], horizontal=True)
 
 pdf_files = []
 
-if mode == "PDFs (hasta 20)":
-    uploaded = st.file_uploader("Subí hasta 20 facturas en PDF", type=["pdf"], accept_multiple_files=True)
+if mode.startswith("PDFs"):
+    uploaded = st.file_uploader("Subí facturas en PDF", type=["pdf"], accept_multiple_files=True)
     if uploaded:
-        if len(uploaded) > 20:
-            st.warning("Subiste más de 20. Para la demo, procesaré solo las primeras 20.")
-            uploaded = uploaded[:20]
+        if MAX_FILES is not None and len(uploaded) > MAX_FILES:
+            st.warning(f"Subiste {len(uploaded)} PDFs. Por configuración se procesarán solo los primeros {MAX_FILES}.")
+            uploaded = uploaded[:MAX_FILES]
         pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
 else:
-    zip_up = st.file_uploader("Subí 1 archivo ZIP (con PDFs). Para la demo se procesan hasta 20.", type=["zip"])
+    zip_up = st.file_uploader("Subí 1 archivo ZIP (con PDFs)", type=["zip"])
     if zip_up:
         try:
             with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
@@ -185,9 +310,9 @@ else:
                 if not names:
                     st.error("El ZIP no contiene PDFs.")
                 else:
-                    if len(names) > 20:
-                        st.warning(f"El ZIP tiene {len(names)} PDFs. Para demo procesaré solo 20.")
-                        names = names[:20]
+                    if MAX_FILES is not None and len(names) > MAX_FILES:
+                        st.warning(f"El ZIP tiene {len(names)} PDFs. Por configuración se procesarán solo {MAX_FILES}.")
+                        names = names[:MAX_FILES]
                     pdf_files = [{"name": n.split('/')[-1], "bytes": z.read(n)} for n in names]
                     st.success(f"PDFs detectados: {len(pdf_files)}")
         except zipfile.BadZipFile:
@@ -250,6 +375,7 @@ st.dataframe(df, use_container_width=True)
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
 st.subheader("Validación AFIP (via backend)")
 st.caption("El backend valida contra AFIP y devuelve el estado por archivo.")
+st.caption(f"Envío al backend en lotes de {BATCH_SIZE} PDFs por request (configurable).")
 
 if st.button("Validar contra AFIP ahora"):
     if not pdf_files:
@@ -257,17 +383,26 @@ if st.button("Validar contra AFIP ahora"):
         st.stop()
 
     try:
-        with st.spinner("Consultando AFIP (via backend)..."):
-            result = backend_verify(
-                base_url=BASE_URL,
-                api_key=st.session_state.auth["api_key"],
-                access_token=st.session_state.auth["access_token"],
-                pdf_items=pdf_files,
-            )
+        all_rows = []
+        batches = chunk_list(pdf_files, BATCH_SIZE)
 
-        backend_rows = result.get("rows", [])
-        if backend_rows:
-            df = pd.DataFrame(backend_rows)
+        batch_progress = st.progress(0)
+        with st.spinner("Consultando AFIP (via backend)..."):
+            for idx, batch in enumerate(batches, start=1):
+                result = backend_verify(
+                    base_url=BASE_URL,
+                    api_key=st.session_state.auth["api_key"],
+                    access_token=st.session_state.auth["access_token"],
+                    pdf_items=batch,
+                    timeout_s=180,
+                )
+                backend_rows = result.get("rows", [])
+                all_rows.extend(backend_rows)
+
+                batch_progress.progress(idx / len(batches))
+
+        if all_rows:
+            df = pd.DataFrame(all_rows)
             st.success("Validación AFIP completada.")
             st.dataframe(df, use_container_width=True)
         else:
@@ -276,7 +411,6 @@ if st.button("Validar contra AFIP ahora"):
         st.error(str(e))
 
 # ===================== EXPORTS (CSV + XLSX) =====================
-# Exporta SIEMPRE lo que esté en df (si validaste, df ya es el de AFIP).
 if not df.empty:
     # CAE como texto (evitar notación científica en Excel)
     if "CAE" in df.columns:
