@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import threading
 import sqlite3
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 import xml.etree.ElementTree as ET
@@ -20,6 +21,13 @@ from urllib3.poolmanager import PoolManager
 
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
+
+
+# ============================================================
+# LOGGING (para ver por qué Postgres cae a SQLite)
+# ============================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("usage")
 
 
 # ============================================================
@@ -196,13 +204,13 @@ def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]
             try:
                 _pg_upsert(ym, files_delta, requests_delta)
                 return _pg_get(ym)
-            except Exception:
-                # fallback (debug / emergencia)
+            except Exception as e:
+                logger.exception("Postgres usage_increment failed; fallback SQLite. Error: %s", e)
                 _sqlite_upsert(ym, files_delta, requests_delta)
                 return _sqlite_get(ym)
-        else:
-            _sqlite_upsert(ym, files_delta, requests_delta)
-            return _sqlite_get(ym)
+
+        _sqlite_upsert(ym, files_delta, requests_delta)
+        return _sqlite_get(ym)
 
 
 def usage_current() -> Dict[str, Any]:
@@ -211,7 +219,8 @@ def usage_current() -> Dict[str, Any]:
         if DATABASE_URL and _is_postgres(DATABASE_URL):
             try:
                 return _pg_get(ym)
-            except Exception:
+            except Exception as e:
+                logger.exception("Postgres usage_current failed; fallback SQLite. Error: %s", e)
                 return _sqlite_get(ym)
         return _sqlite_get(ym)
 
@@ -221,6 +230,40 @@ def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: s
     check_api_key(x_api_key)
     check_bearer(authorization)
     return usage_current()
+
+
+@app.get("/usage/diag")
+def usage_diag(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+
+    diag = {
+        "DATABASE_URL_set": bool(DATABASE_URL),
+        "DATABASE_URL_is_postgres": _is_postgres(DATABASE_URL) if DATABASE_URL else False,
+    }
+
+    try:
+        _pg_init()
+        diag["pg_init"] = "ok"
+    except Exception as e:
+        diag["pg_init"] = "error"
+        diag["pg_init_error"] = str(e)[:800]
+        return diag
+
+    try:
+        _pg_upsert(_year_month_utc(), 0, 0)
+        diag["pg_upsert"] = "ok"
+    except Exception as e:
+        diag["pg_upsert"] = "error"
+        diag["pg_upsert_error"] = str(e)[:800]
+        return diag
+
+    try:
+        diag["pg_get"] = _pg_get(_year_month_utc())
+    except Exception as e:
+        diag["pg_get_error"] = str(e)[:800]
+
+    return diag
 
 
 # ============================================================
