@@ -2,9 +2,6 @@ import io
 import zipfile
 import re
 from datetime import datetime
-from pathlib import Path
-import smtplib
-from email.message import EmailMessage
 
 import pandas as pd
 import streamlit as st
@@ -22,16 +19,6 @@ LOGIN_CUIT_DEFAULT = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
 # Límite opcional por seguridad (si está vacío o no existe => ilimitado)
 MAX_FILES_RAW = st.secrets.get("MAX_FILES", None)
 BATCH_SIZE = int(st.secrets.get("BATCH_SIZE", 50))
-
-# Email fijo por secrets (cliente por deploy)
-CLIENT_EMAIL_TO = st.secrets.get("CLIENT_EMAIL_TO", "")
-CLIENT_NAME = st.secrets.get("CLIENT_NAME", "Cliente")
-
-# SMTP Gmail (App Password)
-SMTP_HOST = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(st.secrets.get("SMTP_PORT", 587))
-SMTP_USER = st.secrets.get("SMTP_USER", "")
-SMTP_APP_PASSWORD = st.secrets.get("SMTP_APP_PASSWORD", "")
 
 def _parse_int_or_none(x):
     try:
@@ -156,35 +143,25 @@ def backend_usage_current(base_url: str, api_key: str, access_token: str):
         raise RuntimeError(f"Usage falló ({r.status_code}): {r.text}")
     return r.json()
 
+def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
+    """
+    Dispara el envío del reporte por email desde el BACKEND.
+    El backend debe tener implementado: POST /usage/email
+    y usar SMTP_* + CLIENT_REPORT_EMAIL desde ENV VARS en Render.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    r = requests.post(f"{base_url}/usage/email", headers=headers, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Enviar email falló ({r.status_code}): {r.text}")
+    return r.json()
+
 def chunk_list(items, size: int):
     if size <= 0:
         return [items]
     return [items[i:i+size] for i in range(0, len(items), size)]
-
-# ===================== EMAIL (GMAIL SMTP) =====================
-def send_gmail_report(to_email: str, subject: str, body: str, attachments: list = None):
-    if not SMTP_USER or not SMTP_APP_PASSWORD:
-        raise RuntimeError("Faltan SMTP_USER / SMTP_APP_PASSWORD en Secrets (Gmail SMTP).")
-
-    msg = EmailMessage()
-    msg["From"] = SMTP_USER
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.set_content(body)
-
-    attachments = attachments or []
-    for att in attachments:
-        mime = att.get("mime", "application/octet-stream")
-        if "/" in mime:
-            maintype, subtype = mime.split("/", 1)
-        else:
-            maintype, subtype = "application", "octet-stream"
-        msg.add_attachment(att["bytes"], maintype=maintype, subtype=subtype, filename=att["filename"])
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_USER, SMTP_APP_PASSWORD)
-        server.send_message(msg)
 
 # ===================== SIDEBAR: LOGIN =====================
 with st.sidebar:
@@ -252,35 +229,18 @@ try:
         st.metric("Mes", ym or "-")
 
     if st.button("Enviar resumen por Gmail al cliente"):
-        if not CLIENT_EMAIL_TO:
-            st.error("Falta CLIENT_EMAIL_TO en Secrets.")
-        else:
-            df_usage = pd.DataFrame([{
-                "Mes": ym,
-                "PDFs": files_count,
-                "Requests": requests_count,
-                "Fecha reporte": datetime.now().strftime("%d/%m/%Y %H:%M"),
-            }])
-            csv_bytes = df_usage.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-
-            subject = f"Resumen mensual Verificador CAE - {ym}"
-            body = (
-                f"Hola {CLIENT_NAME},\n\n"
-                f"Te comparto el resumen de uso del Verificador CAE correspondiente a {ym}:\n"
-                f"- PDFs procesados: {files_count}\n"
-                f"- Solicitudes realizadas: {requests_count}\n\n"
-                f"Adjunto el reporte en CSV.\n\n"
-                f"Saludos,\n"
-                f"Elías\n"
+        try:
+            resp = backend_send_usage_email(
+                base_url=BASE_URL,
+                api_key=st.session_state.auth["api_key"],
+                access_token=st.session_state.auth["access_token"],
             )
+            # Backend puede devolver {"ok": true, "to": "...", "year_month": "...", ...}
+            to_email = resp.get("to") or "(destino configurado en backend)"
+            st.success(f"Email enviado correctamente a {to_email}.")
+        except Exception as e:
+            st.error(str(e))
 
-            send_gmail_report(
-                to_email=CLIENT_EMAIL_TO,
-                subject=subject,
-                body=body,
-                attachments=[{"filename": f"consumo_{ym}.csv", "bytes": csv_bytes, "mime": "text/csv"}],
-            )
-            st.success(f"Email enviado a {CLIENT_EMAIL_TO}.")
 except Exception as e:
     st.warning(f"No pude obtener el consumo: {e}")
 

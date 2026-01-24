@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import threading
 import sqlite3
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 import xml.etree.ElementTree as ET
@@ -70,20 +72,21 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 
 
 # ============================================================
-# USAGE COUNTER (Neon/Postgres preferred, SQLite fallback)
+# USAGE COUNTER (SQLite en Render Disk)
 # ============================================================
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Neon/Postgres
+# Recomendado en Render:
+# SQLITE_PATH=/var/data/usage.db  (si montás Render Disk en /var/data)
 SQLITE_PATH = os.getenv("SQLITE_PATH", "usage.db").strip()
 _DB_LOCK = threading.Lock()
 
-
-def _log(msg: str):
-    # Render captura stdout -> logs
-    print(f"[USAGE] {msg}", flush=True)
-
-
-def _is_postgres(dsn: str) -> bool:
-    return dsn.startswith("postgres://") or dsn.startswith("postgresql://")
+# Email settings (SMTP Gmail)
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587").strip())
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASS = os.getenv("SMTP_PASS", "").strip()  # App Password de Gmail
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip()  # Ej: "Verificador CAE <tu@gmail.com>"
+CLIENT_REPORT_EMAIL = os.getenv("CLIENT_REPORT_EMAIL", "").strip()
+APP_NAME = os.getenv("APP_NAME", "Verificador CAE").strip()
 
 
 def _year_month_utc() -> str:
@@ -91,6 +94,7 @@ def _year_month_utc() -> str:
 
 
 def _sqlite_init():
+    # Crea tabla si no existe
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -131,90 +135,16 @@ def _sqlite_get(year_month: str) -> Dict[str, Any]:
             (year_month,),
         )
         row = cur.fetchone()
+
     if not row:
         return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
+
     return {"year_month": row[0], "files_count": int(row[1]), "requests_count": int(row[2]), "updated_at": row[3]}
-
-
-def _pg_init():
-    """
-    Crea la tabla en Postgres (Neon) si no existe.
-    IMPORTANTE: esto tiene que ejecutarse ANTES del primer INSERT.
-    """
-    import psycopg
-
-    with psycopg.connect(DATABASE_URL, connect_timeout=10) as con:
-        with con.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS public.usage_monthly (
-                    year_month TEXT PRIMARY KEY,
-                    files_count BIGINT NOT NULL DEFAULT 0,
-                    requests_count BIGINT NOT NULL DEFAULT 0,
-                    updated_at TIMESTAMPTZ NOT NULL
-                );
-                """
-            )
-        con.commit()
-
-
-def _pg_upsert(year_month: str, files_delta: int, requests_delta: int):
-    import psycopg
-
-    now = datetime.now(timezone.utc)
-    with psycopg.connect(DATABASE_URL, connect_timeout=10) as con:
-        with con.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO public.usage_monthly (year_month, files_count, requests_count, updated_at)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (year_month) DO UPDATE SET
-                    files_count = public.usage_monthly.files_count + EXCLUDED.files_count,
-                    requests_count = public.usage_monthly.requests_count + EXCLUDED.requests_count,
-                    updated_at = EXCLUDED.updated_at;
-                """,
-                (year_month, int(files_delta), int(requests_delta), now),
-            )
-        con.commit()
-
-
-def _pg_get(year_month: str) -> Dict[str, Any]:
-    import psycopg
-
-    with psycopg.connect(DATABASE_URL, connect_timeout=10) as con:
-        with con.cursor() as cur:
-            cur.execute(
-                "SELECT year_month, files_count, requests_count, updated_at FROM public.usage_monthly WHERE year_month = %s",
-                (year_month,),
-            )
-            row = cur.fetchone()
-
-    if not row:
-        return {"year_month": year_month, "files_count": 0, "requests_count": 0, "updated_at": None}
-
-    return {
-        "year_month": row[0],
-        "files_count": int(row[1]),
-        "requests_count": int(row[2]),
-        "updated_at": str(row[3]) if row[3] is not None else None,
-    }
 
 
 def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]:
     ym = _year_month_utc()
     with _DB_LOCK:
-        if DATABASE_URL and _is_postgres(DATABASE_URL):
-            try:
-                # CLAVE: crear tabla antes del primer INSERT
-                _pg_init()
-                _pg_upsert(ym, files_delta, requests_delta)
-                return _pg_get(ym)
-            except Exception as e:
-                _log(f"Postgres FAIL -> fallback SQLite. Error: {type(e).__name__}: {e}")
-                _sqlite_upsert(ym, files_delta, requests_delta)
-                return _sqlite_get(ym)
-
-        # Sin DATABASE_URL => SQLite
         _sqlite_upsert(ym, files_delta, requests_delta)
         return _sqlite_get(ym)
 
@@ -222,31 +152,45 @@ def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]
 def usage_current() -> Dict[str, Any]:
     ym = _year_month_utc()
     with _DB_LOCK:
-        if DATABASE_URL and _is_postgres(DATABASE_URL):
-            try:
-                _pg_init()
-                return _pg_get(ym)
-            except Exception as e:
-                _log(f"Postgres FAIL en usage_current -> SQLite. Error: {type(e).__name__}: {e}")
-                return _sqlite_get(ym)
         return _sqlite_get(ym)
 
 
+def _send_usage_email(payload: Dict[str, Any]) -> None:
+    if not CLIENT_REPORT_EMAIL:
+        raise RuntimeError("Falta CLIENT_REPORT_EMAIL en env vars.")
+    if not SMTP_USER or not SMTP_PASS:
+        raise RuntimeError("Faltan SMTP_USER / SMTP_PASS (App Password) en env vars.")
+
+    msg = EmailMessage()
+    sender = SMTP_FROM if SMTP_FROM else SMTP_USER
+    msg["From"] = sender
+    msg["To"] = CLIENT_REPORT_EMAIL
+    msg["Subject"] = f"[{APP_NAME}] Reporte de uso mensual {payload.get('year_month','')}"
+    body = (
+        f"{APP_NAME} - Reporte de uso mensual\n\n"
+        f"Mes (UTC): {payload.get('year_month')}\n"
+        f"Requests: {payload.get('requests_count')}\n"
+        f"Archivos procesados: {payload.get('files_count')}\n"
+        f"Última actualización: {payload.get('updated_at')}\n"
+    )
+    msg.set_content(body)
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+
+
 @app.on_event("startup")
-def _startup_init_db():
-    # Intento de init temprano para que la tabla exista apenas levanta el servicio
-    if DATABASE_URL and _is_postgres(DATABASE_URL):
-        try:
-            _pg_init()
-            _log("Postgres OK: tabla public.usage_monthly verificada/creada en startup.")
-        except Exception as e:
-            _log(f"Postgres init FAIL en startup (seguimos con fallback): {type(e).__name__}: {e}")
-    else:
-        try:
-            _sqlite_init()
-            _log("SQLite OK: usage.db inicializada en startup.")
-        except Exception as e:
-            _log(f"SQLite init FAIL en startup: {type(e).__name__}: {e}")
+def on_startup():
+    # Inicializa la DB al levantar (así la tabla existe aunque no hayan consultas)
+    try:
+        _sqlite_init()
+    except Exception:
+        # No frenamos el servicio por el contador
+        pass
 
 
 @app.get("/usage/current")
@@ -254,6 +198,16 @@ def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: s
     check_api_key(x_api_key)
     check_bearer(authorization)
     return usage_current()
+
+
+@app.post("/usage/email")
+def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+
+    data = usage_current()
+    _send_usage_email(data)
+    return {"ok": True, "sent_to": CLIENT_REPORT_EMAIL, "usage": data}
 
 
 # ============================================================
@@ -461,14 +415,8 @@ WSCDC_URLS = {
 }
 
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
-WSCDC_SOAP_ACTION = os.getenv(
-    "WSCDC_SOAP_ACTION",
-    "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
-).strip()
-WSCDC_NS = os.getenv(
-    "WSCDC_NS",
-    "http://servicios1.afip.gob.ar/wscdc/",
-).strip()
+WSCDC_SOAP_ACTION = os.getenv("WSCDC_SOAP_ACTION", "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar").strip()
+WSCDC_NS = os.getenv("WSCDC_NS", "http://servicios1.afip.gob.ar/wscdc/").strip()
 
 
 def require_afip_env():
@@ -484,9 +432,6 @@ def b64_to_bytes(s: str) -> bytes:
     return base64.b64decode(s.encode("utf-8"))
 
 
-# ============================================================
-# TLS FIX: bajar SECLEVEL solo para AFIP (DH_KEY_TOO_SMALL)
-# ============================================================
 class AfipTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
         ctx = ssl.create_default_context()
@@ -502,9 +447,6 @@ AFIP_SESSION.mount("https://servicios1.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
 
 
-# ============================================================
-# WSAA cache (token+sign)
-# ============================================================
 _TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
 
 
@@ -585,12 +527,19 @@ def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> byte
             f.write(tra_xml.encode("utf-8"))
 
         cmd = [
-            "openssl", "smime", "-sign",
-            "-signer", cert_path,
-            "-inkey", key_path,
-            "-in", tra_path,
-            "-out", out_path,
-            "-outform", "DER",
+            "openssl",
+            "smime",
+            "-sign",
+            "-signer",
+            cert_path,
+            "-inkey",
+            key_path,
+            "-in",
+            tra_path,
+            "-out",
+            out_path,
+            "-outform",
+            "DER",
             "-nodetach",
             "-binary",
         ]
@@ -624,7 +573,7 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
   </soap:Body>
 </soap:Envelope>"""
 
-    headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": "loginCms"}
+    headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": WSAA_SOAP_ACTION}
 
     r = AFIP_SESSION.post(wsaa_url, data=soap.encode("utf-8"), headers=headers, timeout=40)
     if r.status_code != 200:
@@ -768,9 +717,7 @@ async def verify(
             cbte_nro = int(cbte_nro_raw) if cbte_nro_raw else None
             cbte_fch_yyyymmdd = date_to_yyyymmdd(cbte_fch)
 
-            # ================================
-            # CLAVE: CUIT EMISOR = DEL PDF
-            # ================================
+            # CUIT EMISOR = DEL PDF
             cuit_emisor = decide_cuit_emisor(text)
 
             # Receptor: auto-detección (si hay 2 CUITs, toma el que no es emisor)
@@ -851,7 +798,7 @@ async def verify(
 
                 resultado = (res.get("resultado") or "").strip()
                 if resultado:
-                    # AFIP: Resultado A suele ser aprobado/ok. R = Rechazado.
+                    # AFIP: A = aprobado/ok. R = rechazado.
                     afip_ok = resultado.upper() in ("A", "OK", "APROBADO")
                     out_rows.append(
                         {
