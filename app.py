@@ -335,7 +335,7 @@ st.dataframe(df, use_container_width=True)
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
 st.subheader("Validación AFIP")
 st.caption("Valida contra AFIP y devuelve el estado por archivo.")
-st.caption(f"Envío en lotes de {BATCH_SIZE} PDFs por request (configurable).")
+st.caption(f"Envío en lotes de {BATCH_SIZE} PDFs por request.")
 
 if st.button("Validar contra AFIP ahora"):
     if not pdf_files:
