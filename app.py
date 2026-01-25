@@ -204,7 +204,7 @@ if not st.session_state.auth["logged"]:
 
 st.info(
     "Flujo: extraemos CAE/Vto desde PDF localmente. "
-    "La validación AFIP se realiza en backend con credenciales del lado servidor."
+    "La validación AFIP se realiza del lado servidor utilizando el servicio oficial WSCDC (Comprobante Constatar)."
 )
 
 # ===================== CONSUMO DEL MES + ENVÍO EMAIL =====================
@@ -333,9 +333,9 @@ st.subheader("Resultados (extracción local)")
 st.dataframe(df, use_container_width=True)
 
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
-st.subheader("Validación AFIP (via backend)")
-st.caption("El backend valida contra AFIP y devuelve el estado por archivo.")
-st.caption(f"Envío al backend en lotes de {BATCH_SIZE} PDFs por request (configurable).")
+st.subheader("Validación AFIP")
+st.caption("Valida contra AFIP y devuelve el estado por archivo.")
+st.caption(f"Envío en lotes de {BATCH_SIZE} PDFs por request (configurable).")
 
 if st.button("Validar contra AFIP ahora"):
     if not pdf_files:
