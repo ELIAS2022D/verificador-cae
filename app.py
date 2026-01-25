@@ -347,7 +347,7 @@ if st.button("Validar contra AFIP ahora"):
         batches = chunk_list(pdf_files, BATCH_SIZE)
 
         batch_progress = st.progress(0)
-        with st.spinner("Consultando AFIP (via backend)..."):
+        with st.spinner("Consultando AFIP..."):
             for idx, batch in enumerate(batches, start=1):
                 result = backend_verify(
                     base_url=BASE_URL,
@@ -366,7 +366,7 @@ if st.button("Validar contra AFIP ahora"):
             st.success("Validación AFIP completada.")
             st.dataframe(df, use_container_width=True)
         else:
-            st.warning("El backend no devolvió rows. Revisá /verify.")
+            st.warning("No se recibieron resultados del servidor. Por favor, intentá nuevamente en unos segundos.")
     except Exception as e:
         st.error(str(e))
 
