@@ -385,7 +385,7 @@ if not df.empty:
     with col1:
         csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(
-            "Descargar CSV (Excel)",
+            "Descargar CSV (.csv)",
             data=csv_bytes,
             file_name="resultado_verificacion_cae.csv",
             mime="text/csv",
