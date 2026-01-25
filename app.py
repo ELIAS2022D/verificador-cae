@@ -237,7 +237,7 @@ try:
             )
             # Backend puede devolver {"ok": true, "to": "...", "year_month": "...", ...}
             to_email = resp.get("to") or "(destino configurado en backend)"
-            st.success(f"Email enviado correctamente a {to_email}.")
+            st.success(f"Email enviado correctamente")
         except Exception as e:
             st.error(str(e))
 
