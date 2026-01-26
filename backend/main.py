@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 
 import pdfplumber
 import requests
+import certifi
 
 # ===== QR + OCR =====
 import fitz  # PyMuPDF
@@ -23,9 +24,6 @@ import pytesseract
 import ssl
 from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
-
-# ===== CERT BUNDLE =====
-import certifi
 
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -168,6 +166,7 @@ def _pdf_page_to_png_bytes(pdf_bytes: bytes, page_index: int = 0, dpi: int = 220
 def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]:
     """
     Intenta leer QR AFIP (RG 4892). Devuelve dict si encuentra payload, si no {}.
+    Maneja base64 urlsafe (con '-' '_' ) y prueba todos los QRs detectados.
     """
     for pi in range(max_pages):
         try:
@@ -189,15 +188,16 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
                     p = (qs.get("p") or [None])[0]
                     if not p:
                         continue
+
                     pad = "=" * (-len(p) % 4)
                     payload_b64 = p + pad
 
-                    # urlsafe es más robusto (a veces viene con - y _)
                     payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore")
                     import json
 
                     data = json.loads(payload_json)
-                    return data or {}
+                    if isinstance(data, dict) and data:
+                        return data
         except Exception:
             continue
     return {}
@@ -261,16 +261,17 @@ CBTENRO_PATTERNS = [
 CBTEFCH_PATTERNS = [
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{2}[/-]\d{2}[/-]\d{4})\b", re.IGNORECASE),
     re.compile(r"\bFecha\s+de\s+Emisi[oó]n:?\s*(\d{4}[/-]\d{2}[/-]\d{2})\b", re.IGNORECASE),
+    # fallback: "Fecha: 21/01/2026"
     re.compile(r"\bFecha:?\s*(\d{2}[/-]\d{2}[/-]\d{4})\b", re.IGNORECASE),
 ]
 
 TOTAL_PATTERNS = [
     re.compile(
-        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|IMPORTE\s+FINAL|TOTAL)\b\D{0,60}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
+        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|IMPORTE\s+FINAL|TOTAL)\b\D{0,80}(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|TOTAL)\b\D{0,60}\$\s*(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
+        r"\b(?:IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|IMP\.?\s*TOTAL|TOTAL)\b\D{0,80}\$\s*(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+(?:,\d{2})|\d+(?:\.\d{2}))",
         re.IGNORECASE,
     ),
 ]
@@ -279,6 +280,7 @@ FACTURA_TIPO_PATTERNS = [
     re.compile(r"\bA\s+FACTURA\b", re.IGNORECASE),
     re.compile(r"\bB\s+FACTURA\b", re.IGNORECASE),
     re.compile(r"\bC\s+FACTURA\b", re.IGNORECASE),
+    # fallback: "Factura A" / "Factura B"
     re.compile(r"\bFactura\s+([ABC])\b", re.IGNORECASE),
 ]
 
@@ -300,6 +302,7 @@ def find_first(patterns, text: str) -> Optional[str]:
         m = pat.search(text)
         if m:
             return m.group(1)
+    # fallback: ventana alrededor de "cae"
     idx = text.lower().find("cae")
     if idx != -1:
         window = text[idx: idx + 250]
@@ -352,16 +355,33 @@ def date_to_yyyymmdd(d) -> Optional[str]:
 
 
 def normalize_amount_ar_to_float(s: Optional[str]) -> Optional[float]:
+    """
+    Normaliza importes AR (1.234,56) y protege contra falsos positivos:
+    - si el "importe" parece un CAE (14 dígitos) => None
+    - si es un número exagerado (muy probable parsing incorrecto) => None
+    """
     if not s:
         return None
     x = s.strip().replace(" ", "")
+
+    # si es un número "plano" de 14 dígitos, es casi seguro un CAE mal capturado
+    if re.fullmatch(r"\d{14}", x):
+        return None
+
     if "," in x:
         x = x.replace(".", "")
         x = x.replace(",", ".")
     try:
-        return float(x)
+        v = float(x)
     except ValueError:
         return None
+
+    # guardia de magnitud (evita mandar CAE/IDs como total)
+    # Ajustá el umbral si tu negocio realmente factura arriba de 1.000 millones
+    if v >= 1_000_000_000:
+        return None
+
+    return v
 
 
 def detect_factura_letra(text: str) -> Optional[str]:
@@ -402,6 +422,11 @@ def decide_cuit_emisor(text: str) -> Optional[str]:
 
 
 def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Intenta deducir receptor desde el PDF:
+    - si hay otro CUIT distinto al emisor => DocTipo=80
+    - si hay DNI => DocTipo=96
+    """
     cuit_emisor = (cuit_emisor or "").strip()
     cuits = extract_all_cuits(text)
 
@@ -417,6 +442,31 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
     return None, None
 
 
+def _sanitize_receptor(doc_tipo: Optional[int], doc_nro: Optional[str]) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Evita receptores imposibles (ej: DocTipo=96 y nro de 14 dígitos).
+    """
+    if not doc_tipo or not doc_nro:
+        return None, None
+
+    n = re.sub(r"\D+", "", str(doc_nro).strip())
+
+    if doc_tipo == 80:
+        if not re.fullmatch(r"\d{11}", n):
+            return None, None
+        return 80, n
+
+    if doc_tipo == 96:
+        if not re.fullmatch(r"\d{7,8}", n):
+            return None, None
+        return 96, n
+
+    # otros tipos: dejamos pasar solo si hay número razonable
+    if len(n) < 5 or len(n) > 20:
+        return None, None
+    return int(doc_tipo), n
+
+
 # ============================================================
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
@@ -430,7 +480,7 @@ WSAA_URLS = {
     "homo": "https://wsaahomo.afip.gov.ar/ws/services/LoginCms",
 }
 
-# ✅ FIX: WSCDC PROD debe ir en afip.gov.ar (no afip.gob.ar)
+# ✅ FIX: WSCDC PROD va en afip.gov.ar (no afip.gob.ar)
 WSCDC_URLS = {
     "prod": "https://servicios1.afip.gov.ar/WSCDC/service.asmx",
     "homo": "https://wswhomo.afip.gob.ar/WSCDC/service.asmx",
@@ -470,20 +520,18 @@ class AfipTLSAdapter(HTTPAdapter):
         self.poolmanager = PoolManager(num_pools=connections, maxsize=maxsize, block=block, **pool_kwargs)
 
 
-# Forzar bundle CA para requests (robusto en contenedores)
+# Bundle CA explícito (útil en contenedores)
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 AFIP_SESSION = requests.Session()
-AFIP_SESSION.trust_env = False  # ignora HTTP(S)_PROXY del entorno (evita MITM/hostname mismatch)
+AFIP_SESSION.trust_env = False  # ✅ evita proxies del entorno (MITM / hostname mismatch)
 
 AFIP_SESSION.mount("https://wsaa.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wsaahomo.afip.gov.ar", AfipTLSAdapter())
 
-# ✅ FIX: montar el host correcto de WSCDC PROD
+# ✅ FIX: montar host correcto de WSCDC PROD
 AFIP_SESSION.mount("https://servicios1.afip.gov.ar", AfipTLSAdapter())
-
-# HOMO sigue en afip.gob.ar
 AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
 
 
@@ -567,19 +615,12 @@ def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> byte
             f.write(tra_xml.encode("utf-8"))
 
         cmd = [
-            "openssl",
-            "smime",
-            "-sign",
-            "-signer",
-            cert_path,
-            "-inkey",
-            key_path,
-            "-in",
-            tra_path,
-            "-out",
-            out_path,
-            "-outform",
-            "DER",
+            "openssl", "smime", "-sign",
+            "-signer", cert_path,
+            "-inkey", key_path,
+            "-in", tra_path,
+            "-out", out_path,
+            "-outform", "DER",
             "-nodetach",
             "-binary",
         ]
@@ -768,20 +809,26 @@ async def verify(
 
             cuit_emisor = decide_cuit_emisor(text)
 
-            # --- aplicar QR como “override inteligente” si viene ---
+            # receptor desde PDF (luego lo pisamos con QR si existe)
+            doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor or "")
+            doc_tipo_rec, doc_nro_rec = _sanitize_receptor(doc_tipo_rec, doc_nro_rec)
+
+            # --- aplicar QR como “source of truth” si viene ---
             if qr:
                 try:
+                    # Emisor / Comprobante
                     if qr.get("cuit"):
                         cuit_emisor = str(qr.get("cuit")).strip() or cuit_emisor
-                    if qr.get("ptoVta"):
-                        pto_vta = int(qr.get("ptoVta")) if qr.get("ptoVta") else pto_vta
-                    if qr.get("tipoCmp"):
-                        cbte_tipo = int(qr.get("tipoCmp")) if qr.get("tipoCmp") else cbte_tipo
-                    if qr.get("nroCmp"):
-                        cbte_nro = int(qr.get("nroCmp")) if qr.get("nroCmp") else cbte_nro
+                    if qr.get("ptoVta") is not None:
+                        pto_vta = int(qr.get("ptoVta"))
+                    if qr.get("tipoCmp") is not None:
+                        cbte_tipo = int(qr.get("tipoCmp"))
+                    if qr.get("nroCmp") is not None:
+                        cbte_nro = int(qr.get("nroCmp"))
 
+                    # Fecha
                     fqr = (qr.get("fecha") or "").strip()
-                    if fqr and not cbte_fch_yyyymmdd:
+                    if fqr:
                         if "-" in fqr and len(fqr) >= 10:
                             cbte_fch_yyyymmdd = fqr[:10].replace("-", "")
                         elif "/" in fqr:
@@ -791,31 +838,47 @@ async def verify(
                             except Exception:
                                 pass
 
-                    if imp_total is None and qr.get("importe") is not None:
+                    # Importe
+                    if qr.get("importe") is not None:
                         try:
                             imp_total = float(qr.get("importe"))
                         except Exception:
                             pass
 
-                    if (not cae_pdf) and qr.get("codAut"):
+                    # CAE
+                    if qr.get("codAut"):
                         cae_pdf = str(qr.get("codAut")).strip()
+
+                    # ✅ Receptor desde QR (cuando existe)
+                    # (en el esquema QR AFIP suele venir tipoDocRec / nroDocRec)
+                    q_tipo_doc = qr.get("tipoDocRec")
+                    q_nro_doc = qr.get("nroDocRec")
+                    if q_tipo_doc is not None and q_nro_doc is not None:
+                        doc_tipo_rec, doc_nro_rec = _sanitize_receptor(int(q_tipo_doc), str(q_nro_doc))
+                except Exception:
+                    pass
+
+            # ✅ Guardias finales contra falsos positivos:
+            # - si ImpTotal quedó igual al CAE (caso que viste en tu screenshot) => invalidarlo
+            if cae_pdf and imp_total is not None:
+                try:
+                    # comparamos contra parte entera para tolerar .00
+                    if str(int(round(float(imp_total)))) == str(cae_pdf).strip():
+                        imp_total = None
                 except Exception:
                     pass
 
             # si siguen faltando campos críticos, hacemos OCR “más agresivo”
             missing_critical = (
-                (cbte_fch_yyyymmdd is None)
-                or (imp_total is None)
-                or (cbte_tipo is None)
-                or (pto_vta is None)
-                or (cbte_nro is None)
-                or (not cuit_emisor)
+                (cbte_fch_yyyymmdd is None) or (imp_total is None) or (cbte_tipo is None) or
+                (pto_vta is None) or (cbte_nro is None) or (not cuit_emisor)
             )
             if missing_critical:
                 text_ocr2 = _ocr_pdf_text(pdf_bytes, max_pages=3)
                 if text_ocr2:
                     text2 = (text or "") + "\n" + text_ocr2
 
+                    # reintentar parse sobre texto extendido
                     cae_pdf = cae_pdf or find_first(CAE_PATTERNS, text2)
                     vto_raw = vto_raw or find_first(VTO_PATTERNS, text2)
                     vto_pdf = vto_pdf or parse_date(vto_raw)
@@ -837,8 +900,20 @@ async def verify(
 
                     cuit_emisor = cuit_emisor or decide_cuit_emisor(text2)
 
-            # receptor auto (si hay 2 CUITs, toma el que no es emisor)
-            doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor or "")
+                    # receptor desde OCR (solo si no había y no vino por QR)
+                    if not doc_tipo_rec or not doc_nro_rec:
+                        dtr2, dnr2 = decide_receptor_doc(text2, cuit_emisor=cuit_emisor or "")
+                        dtr2, dnr2 = _sanitize_receptor(dtr2, dnr2)
+                        doc_tipo_rec = doc_tipo_rec or dtr2
+                        doc_nro_rec = doc_nro_rec or dnr2
+
+                    # guardia ImpTotal vs CAE (otra vez)
+                    if cae_pdf and imp_total is not None:
+                        try:
+                            if str(int(round(float(imp_total)))) == str(cae_pdf).strip():
+                                imp_total = None
+                        except Exception:
+                            pass
 
             status = []
             status.append("CAE encontrado" if cae_pdf else "CAE NO encontrado")
@@ -857,6 +932,15 @@ async def verify(
             if len((text or "").strip()) < 40 or missing_critical:
                 status.append("OCR aplicado")
 
+            # Reglas automáticas A/B/C
+            require_receptor = (factura_letra == "A")
+
+            # ✅ Para FACTURA A: si el QR no trajo receptor, NO usar DNI “por defecto”.
+            # Exigimos CUIT receptor (DocTipo=80) para evitar rechazos R por receptor inválido.
+            if require_receptor:
+                if doc_tipo_rec != 80:
+                    doc_tipo_rec, doc_nro_rec = None, None
+
             missing = []
             if cbte_tipo is None:
                 missing.append("CbteTipo")
@@ -872,6 +956,12 @@ async def verify(
                 missing.append("ImpTotal")
             if not cuit_emisor:
                 missing.append("CuitEmisor(PDF/QR)")
+
+            if require_receptor:
+                if not doc_tipo_rec:
+                    missing.append("DocTipoReceptor")
+                if not doc_nro_rec:
+                    missing.append("DocNroReceptor")
 
             if missing:
                 out_rows.append(
@@ -927,7 +1017,13 @@ async def verify(
                             "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                             "DocNroRec": doc_nro_rec or "",
                             "AFIP": "OK" if afip_ok else "NO_CONSTA",
-                            "Detalle AFIP": f"WSCDC Resultado={resultado}",
+                            "Detalle AFIP": (
+                                f"WSCDC Resultado={resultado} | Enviado: "
+                                f"CuitEmisor={cuit_emisor} PtoVta={pto_vta} CbteTipo={cbte_tipo} "
+                                f"CbteNro={cbte_nro} CbteFch={cbte_fch_yyyymmdd} "
+                                f"ImpTotal={float(imp_total):.2f} CAE={str(cae_pdf).strip()} "
+                                f"DocTipoRec={doc_tipo_rec or ''} DocNroRec={doc_nro_rec or ''}"
+                            ),
                         }
                     )
                 else:
