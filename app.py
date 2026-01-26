@@ -203,7 +203,7 @@ if not st.session_state.auth["logged"]:
     st.stop()
 
 st.info(
-    "Flujo: extraemos CAE/Vto desde PDF localmente. "
+    "Flujo: extraemos CAE/Vto desde PDF localmente."
     "La validación AFIP se realiza del lado servidor utilizando el servicio oficial WSCDC (Comprobante Constatar)."
 )
 
@@ -329,7 +329,7 @@ df = pd.DataFrame(rows) if rows else pd.DataFrame(
     columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]
 )
 
-st.subheader("Resultados (extracción local)")
+st.subheader("Vista previa de las facturas")
 st.dataframe(df, use_container_width=True)
 
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
