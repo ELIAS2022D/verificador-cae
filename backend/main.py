@@ -24,6 +24,9 @@ import ssl
 from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 
+# ===== CERT BUNDLE (FIX SSL HOSTNAME MISMATCH / CERT VERIFY) =====
+import certifi
+
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
@@ -166,9 +169,6 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
     """
     Intenta leer QR AFIP (RG 4892). Devuelve dict si encuentra payload, si no {}.
     """
-    import json
-    from urllib.parse import urlparse, parse_qs
-
     for pi in range(max_pages):
         try:
             img_bytes = _pdf_page_to_png_bytes(pdf_bytes, page_index=pi, dpi=240)
@@ -177,29 +177,25 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
             if not codes:
                 continue
 
-            # probar TODOS los QRs encontrados
             for c in codes:
-                try:
-                    raw = c.data.decode("utf-8", "ignore").strip()
+                raw = c.data.decode("utf-8", "ignore").strip()
 
-                    # suele ser URL con param 'p'
-                    if raw.startswith("http") and "p=" in raw:
-                        parsed = urlparse(raw)
-                        qs = parse_qs(parsed.query)
-                        p = (qs.get("p") or [None])[0]
-                        if not p:
-                            continue
+                # suele ser URL con param 'p'
+                if raw.startswith("http") and "p=" in raw:
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(raw)
+                    qs = parse_qs(parsed.query)
+                    p = (qs.get("p") or [None])[0]
+                    if not p:
+                        continue
+                    pad = "=" * (-len(p) % 4)
+                    payload_b64 = p + pad
 
-                        pad = "=" * (-len(p) % 4)
-                        payload_b64 = p + pad
-
-                        # urlsafe por si viene con '-' y '_'
-                        payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore")
-                        data = json.loads(payload_json)
-                        if isinstance(data, dict) and data:
-                            return data
-                except Exception:
-                    continue
+                    # urlsafe es más robusto (a veces viene con - y _)
+                    payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore")
+                    import json
+                    data = json.loads(payload_json)
+                    return data or {}
         except Exception:
             continue
     return {}
@@ -207,7 +203,7 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
 
 def _ocr_pdf_text(pdf_bytes: bytes, max_pages: int = 2) -> str:
     """
-    OCR de páginas iniciales. Usamos spa por si aparecen labels, pero nos interesa sobre todo números/fechas.
+    OCR de páginas iniciales.
     """
     texts = []
     for pi in range(max_pages):
@@ -420,54 +416,6 @@ def decide_receptor_doc(text: str, cuit_emisor: str) -> Tuple[Optional[int], Opt
 
 
 # ============================================================
-# Robustez: candidatos CUIT emisor + helpers
-# ============================================================
-def unique_keep_order(items: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for x in items:
-        x = (x or "").strip()
-        if not x:
-            continue
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
-
-def build_cuit_emisor_candidates(text: str, qr: Dict[str, Any]) -> List[str]:
-    cands: List[str] = []
-    if qr and qr.get("cuit"):
-        cands.append(str(qr.get("cuit")).strip())
-
-    cands.extend(extract_all_cuits(text))
-    cands = unique_keep_order(cands)
-
-    t = (text or "").lower()
-
-    def score(cuit: str) -> int:
-        idx = t.find(cuit)
-        if idx == -1:
-            return 0
-        win = t[max(0, idx - 140): idx + 140]
-        s = 0
-        if "ing. brutos" in win or "ing brutos" in win:
-            s += 3
-        if "inicio" in win and "activ" in win:
-            s += 3
-        if "razón social" in win or "razon social" in win:
-            s += 2
-        if "domicilio" in win:
-            s += 1
-        if "i.v.a" in win or "iva" in win:
-            s += 1
-        return s
-
-    cands.sort(key=score, reverse=True)
-    return cands[:5]
-
-
-# ============================================================
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
@@ -511,17 +459,25 @@ def b64_to_bytes(s: str) -> bytes:
 
 class AfipTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
-        ctx = ssl.create_default_context()
+        # CA bundle confiable dentro de Docker + ciphers AFIP legacy
+        ctx = ssl.create_default_context(cafile=certifi.where())
         ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
         pool_kwargs["ssl_context"] = ctx
         self.poolmanager = PoolManager(num_pools=connections, maxsize=maxsize, block=block, **pool_kwargs)
 
 
+# Forzar bundle CA para requests (extra robustez en contenedores)
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
 AFIP_SESSION = requests.Session()
+AFIP_SESSION.trust_env = False  # <<< FIX CRÍTICO: ignora proxies del entorno (evita certs MITM/hostname mismatch)
+
 AFIP_SESSION.mount("https://wsaa.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wsaahomo.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://servicios1.afip.gob.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
+
 
 _TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
 
@@ -738,24 +694,6 @@ def wscdc_comprobante_constatar(
     return {"resultado": resultado, "raw": r.text}
 
 
-def constatar_with_optional_receptor(**kwargs) -> Tuple[Dict[str, Any], str]:
-    """
-    1) intenta sin receptor
-    2) si falla y tenemos receptor, reintenta con receptor
-    """
-    k1 = dict(kwargs)
-    k1["doc_tipo_receptor"] = None
-    k1["doc_nro_receptor"] = None
-    try:
-        return wscdc_comprobante_constatar(**k1), "SIN_RECEPTOR"
-    except Exception as e1:
-        dt = kwargs.get("doc_tipo_receptor")
-        dn = kwargs.get("doc_nro_receptor")
-        if dt and dn:
-            return wscdc_comprobante_constatar(**kwargs), "CON_RECEPTOR"
-        raise e1
-
-
 # ============================================================
 # VERIFY ENDPOINT (PROD)
 # ============================================================
@@ -769,7 +707,6 @@ async def verify(
     check_bearer(authorization)
     require_afip_env()
 
-    # contador: suma por request + cantidad de archivos
     try:
         usage_increment(files_delta=len(files), requests_delta=1)
     except Exception:
@@ -782,18 +719,13 @@ async def verify(
         try:
             pdf_bytes = await f.read()
 
-            # 1) Intentar QR primero (lo más robusto)
             qr = _try_extract_afip_qr(pdf_bytes, max_pages=2)
 
-            # 2) Texto normal por pdfplumber
             text = extract_text_pdf(pdf_bytes, max_pages=5)
-
-            # Si casi no hay texto, OCR ayuda muchísimo
             if len((text or "").strip()) < 40:
                 text_ocr = _ocr_pdf_text(pdf_bytes, max_pages=2)
                 text = (text or "") + "\n" + (text_ocr or "")
 
-            # --- campos desde texto ---
             cae_pdf = find_first(CAE_PATTERNS, text)
             vto_raw = find_first(VTO_PATTERNS, text)
             vto_pdf = parse_date(vto_raw)
@@ -815,7 +747,6 @@ async def verify(
 
             cuit_emisor = decide_cuit_emisor(text)
 
-            # --- aplicar QR como “override inteligente” si viene ---
             if qr:
                 try:
                     if qr.get("cuit"):
@@ -849,7 +780,6 @@ async def verify(
                 except Exception:
                     pass
 
-            # si siguen faltando campos críticos, OCR “más agresivo”
             missing_critical = (
                 (cbte_fch_yyyymmdd is None) or (imp_total is None) or (cbte_tipo is None) or
                 (pto_vta is None) or (cbte_nro is None) or (not cuit_emisor)
@@ -879,9 +809,7 @@ async def verify(
                     cbte_fch_yyyymmdd = cbte_fch_yyyymmdd or date_to_yyyymmdd(cbte_fch)
 
                     cuit_emisor = cuit_emisor or decide_cuit_emisor(text2)
-                    text = text2  # mantener texto extendido para heurísticas
 
-            # receptor auto (si hay 2 CUITs, toma el que no es emisor)
             doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor or "")
 
             status = []
@@ -901,7 +829,6 @@ async def verify(
             if len((text or "").strip()) < 40 or missing_critical:
                 status.append("OCR aplicado")
 
-            # campos mínimos para WSCDC (sin obligar receptor)
             missing = []
             if cbte_tipo is None:
                 missing.append("CbteTipo")
@@ -915,12 +842,8 @@ async def verify(
                 missing.append("CAE")
             if imp_total is None:
                 missing.append("ImpTotal")
-
-            # NOTA: no bloqueamos por CUIT emisor único, porque lo vamos a probar por candidatos
-            # pero si no hay NI un CUIT, sí es insuficiente
-            cuit_candidates = build_cuit_emisor_candidates(text, qr)
-            if not cuit_candidates:
-                missing.append("CuitEmisor(PDF/QR/OCR)")
+            if not cuit_emisor:
+                missing.append("CuitEmisor(PDF/QR)")
 
             if missing:
                 out_rows.append(
@@ -944,38 +867,18 @@ async def verify(
                 )
                 continue
 
-            # ===============================
-            # Consulta AFIP robusta (CUIT candidates + retry receptor)
-            # ===============================
             try:
-                afip_last_error = None
-                res = None
-                modo = None
-                chosen_cuit = None
-
-                for cuit_try in cuit_candidates:
-                    try:
-                        res, modo = constatar_with_optional_receptor(
-                            cbte_tipo=int(cbte_tipo),
-                            pto_vta=int(pto_vta),
-                            cbte_nro=int(cbte_nro),
-                            cbte_fch_yyyymmdd=str(cbte_fch_yyyymmdd),
-                            cae=str(cae_pdf).strip(),
-                            imp_total=float(imp_total),
-                            cuit_emisor=str(cuit_try).strip(),
-                            doc_tipo_receptor=doc_tipo_rec,
-                            doc_nro_receptor=doc_nro_rec,
-                        )
-                        chosen_cuit = cuit_try
-                        break
-                    except Exception as e:
-                        afip_last_error = e
-
-                if not res:
-                    raise afip_last_error or RuntimeError("No se pudo constatar con CUITs candidatos.")
-
-                if modo:
-                    status.append(f"WSCDC {modo}")
+                res = wscdc_comprobante_constatar(
+                    cbte_tipo=int(cbte_tipo),
+                    pto_vta=int(pto_vta),
+                    cbte_nro=int(cbte_nro),
+                    cbte_fch_yyyymmdd=str(cbte_fch_yyyymmdd),
+                    cae=str(cae_pdf).strip(),
+                    imp_total=float(imp_total),
+                    cuit_emisor=str(cuit_emisor).strip(),
+                    doc_tipo_receptor=doc_tipo_rec,
+                    doc_nro_receptor=doc_nro_rec,
+                )
 
                 resultado = (res.get("resultado") or "").strip()
                 if resultado:
@@ -992,7 +895,7 @@ async def verify(
                             "CbteNro": int(cbte_nro),
                             "CbteFch": cbte_fch_yyyymmdd,
                             "ImpTotal": f"{float(imp_total):.2f}",
-                            "CuitEmisor": chosen_cuit or (cuit_emisor or ""),
+                            "CuitEmisor": cuit_emisor,
                             "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                             "DocNroRec": doc_nro_rec or "",
                             "AFIP": "OK" if afip_ok else "NO_CONSTA",
@@ -1012,7 +915,7 @@ async def verify(
                             "CbteNro": int(cbte_nro),
                             "CbteFch": cbte_fch_yyyymmdd,
                             "ImpTotal": f"{float(imp_total):.2f}",
-                            "CuitEmisor": chosen_cuit or (cuit_emisor or ""),
+                            "CuitEmisor": cuit_emisor,
                             "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                             "DocNroRec": doc_nro_rec or "",
                             "AFIP": "OK_HTTP",
@@ -1033,7 +936,7 @@ async def verify(
                         "CbteNro": int(cbte_nro) if cbte_nro is not None else "",
                         "CbteFch": cbte_fch_yyyymmdd or "",
                         "ImpTotal": f"{float(imp_total):.2f}" if imp_total is not None else "",
-                        "CuitEmisor": (cuit_emisor or (cuit_candidates[0] if cuit_candidates else "")) or "",
+                        "CuitEmisor": cuit_emisor or "",
                         "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                         "DocNroRec": doc_nro_rec or "",
                         "AFIP": "ERROR_AFIP",
