@@ -204,10 +204,11 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
 
     subject = f"Resumen de uso - {ym} (Verificador CAE)"
     text = (
-        f"Resumen de uso - {ym}\n"
+        f"Resumen de uso - {ym}\n Estimado cliente,\n\n"
         f"PDFs procesados: {files_count}\n"
         f"Solicitudes realizadas: {requests_count}\n"
         f"Actualizado: {updated_at}\n"
+        f"\nGracias por usar nuestro servicio.\n"
     )
     html = f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.4;">
