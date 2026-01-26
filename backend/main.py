@@ -210,28 +210,27 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
         f"Actualizado: {updated_at}\n"
         f"\nGracias por usar nuestro servicio.\n"
     )
-    html = f"""
-    <div style="font-family: Arial, sans-serif; line-height: 1.4;">
-      <h2>Resumen de uso - {ym}</h2>
-      <ul>
-        <li><b>PDFs procesados:</b> {files_count}</li>
-        <li><b>Solicitudes realizadas:</b> {requests_count}</li>
-        <li><b>Actualizado:</b> {updated_at}</li>
-      </ul>
-    </div>
-    """
+    html = (
+        "<div style='font-family: Arial, sans-serif; line-height: 1.5;'>"
+        f"<h2>Resumen de uso - {ym}</h2>"
+        "<p>Estimado cliente,</p>"
+        f"<p><b>PDFs procesados:</b> {files_count}<br>"
+        f"<b>Solicitudes realizadas:</b> {requests_count}<br>"
+        f"<b>Actualizado:</b> {updated_at}</p>"
+        "<p>Gracias por usar nuestro servicio.</p>"
+        "</div>"
+    )
 
-    params: resend.Emails.SendParams = {
+    params = {
         "from": SMTP_FROM,
         "to": to_list,
         "subject": subject,
-        "text": text,
-        "html": html,
+        "text": text,   # backup para clientes que no muestran HTML
+        "html": html,   # lo que se va a ver normalmente
     }
 
     resp = resend.Emails.send(params)
     return {"ok": True, "provider": "resend", "to": to_list, "resend": resp}
-
 
 @app.post("/usage/email")
 def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
