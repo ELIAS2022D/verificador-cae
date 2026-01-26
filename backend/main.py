@@ -77,6 +77,7 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
     return {"access_token": DEMO_ACCESS_TOKEN}
 
+
 # ============================================================
 # USAGE COUNTER (SQLite en disk de Render)
 # ============================================================
@@ -85,19 +86,29 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 # 2) Si existe /var/data (Render Disk) => /var/data/usage.db
 # 3) fallback => /tmp/usage.db (efímero)
 SQLITE_PATH = (os.getenv("SQLITE_PATH", "") or "").strip()
-
 if not SQLITE_PATH:
     if os.path.isdir("/var/data"):
         SQLITE_PATH = "/var/data/usage.db"
     else:
         SQLITE_PATH = "/tmp/usage.db"
+
 _DB_LOCK = threading.Lock()
+
 
 def _year_month_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
+def _ensure_sqlite_dir():
+    # Si SQLITE_PATH es un archivo con path, asegura que exista el directorio
+    if "/" in SQLITE_PATH:
+        dirp = os.path.dirname(SQLITE_PATH)
+        if dirp:
+            os.makedirs(dirp, exist_ok=True)
+
+
 def _sqlite_init():
+    _ensure_sqlite_dir()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -113,6 +124,7 @@ def _sqlite_init():
 
 
 def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
+    _ensure_sqlite_dir()
     now_iso = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
@@ -163,13 +175,13 @@ def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: s
 
 
 # ============================================================
-# EMAIL REPORT (Alineado a tus ENV actuales)
+# EMAIL REPORT (Resend, alineado a tus ENV)
 # ============================================================
-# ENV según tu screenshot:
+# ENV:
 # - EMAIL_PROVIDER=resend
 # - RESEND_API_KEY=...
-# - SMTP_FROM="Verificador CAE <onboarding@resend.dev>"  (lo usamos como FROM)
-# - CLIENT_REPORT_EMAIL=derricoelias@gmail.com           (destinatario)
+# - SMTP_FROM="Verificador CAE <onboarding@resend.dev>"
+# - CLIENT_REPORT_EMAIL=derricoelias@gmail.com  (puede ser CSV: a@a.com,b@b.com)
 EMAIL_PROVIDER = (os.getenv("EMAIL_PROVIDER", "resend") or "").strip().lower()
 RESEND_API_KEY = (os.getenv("RESEND_API_KEY", "") or "").strip()
 SMTP_FROM = (os.getenv("SMTP_FROM", "") or "").strip()
@@ -203,13 +215,18 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
     updated_at = usage.get("updated_at") or "-"
 
     subject = f"Resumen de uso - {ym} (Verificador CAE)"
+
+    # Texto plano (backup)
     text = (
-        f"Resumen de uso - {ym}\n Estimado cliente,\n\n"
+        f"Resumen de uso - {ym}\n"
+        f"Estimado cliente,\n\n"
         f"PDFs procesados: {files_count}\n"
         f"Solicitudes realizadas: {requests_count}\n"
-        f"Actualizado: {updated_at}\n"
-        f"\nGracias por usar nuestro servicio.\n"
+        f"Actualizado: {updated_at}\n\n"
+        f"Gracias por usar nuestro servicio.\n"
     )
+
+    # HTML (lo que se ve normalmente)
     html = (
         "<div style='font-family: Arial, sans-serif; line-height: 1.5;'>"
         f"<h2>Resumen de uso - {ym}</h2>"
@@ -225,12 +242,13 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
         "from": SMTP_FROM,
         "to": to_list,
         "subject": subject,
-        "text": text,   # backup para clientes que no muestran HTML
-        "html": html,   # lo que se va a ver normalmente
+        "text": text,
+        "html": html,
     }
 
     resp = resend.Emails.send(params)
     return {"ok": True, "provider": "resend", "to": to_list, "resend": resp}
+
 
 @app.post("/usage/email")
 def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
@@ -397,7 +415,7 @@ def find_first(patterns, text: str) -> Optional[str]:
     # fallback: ventana alrededor de "cae"
     idx = text.lower().find("cae")
     if idx != -1:
-        window = text[idx: idx + 250]
+        window = text[idx : idx + 250]
         m2 = re.search(r"(\d{14})", window)
         if m2:
             return m2.group(1)
@@ -469,7 +487,6 @@ def normalize_amount_ar_to_float(s: Optional[str]) -> Optional[float]:
         return None
 
     # guardia de magnitud (evita mandar CAE/IDs como total)
-    # Ajustá el umbral si tu negocio realmente factura arriba de 1.000 millones
     if v >= 1_000_000_000:
         return None
 
@@ -553,7 +570,6 @@ def _sanitize_receptor(doc_tipo: Optional[int], doc_nro: Optional[str]) -> Tuple
             return None, None
         return 96, n
 
-    # otros tipos: dejamos pasar solo si hay número razonable
     if len(n) < 5 or len(n) > 20:
         return None, None
     return int(doc_tipo), n
@@ -625,7 +641,6 @@ AFIP_SESSION.mount("https://wsaahomo.afip.gov.ar", AfipTLSAdapter())
 # ✅ FIX: montar host correcto de WSCDC PROD
 AFIP_SESSION.mount("https://servicios1.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
-
 
 _TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
 
@@ -959,8 +974,12 @@ async def verify(
 
             # si siguen faltando campos críticos, hacemos OCR “más agresivo”
             missing_critical = (
-                (cbte_fch_yyyymmdd is None) or (imp_total is None) or (cbte_tipo is None) or
-                (pto_vta is None) or (cbte_nro is None) or (not cuit_emisor)
+                (cbte_fch_yyyymmdd is None)
+                or (imp_total is None)
+                or (cbte_tipo is None)
+                or (pto_vta is None)
+                or (cbte_nro is None)
+                or (not cuit_emisor)
             )
             if missing_critical:
                 text_ocr2 = _ocr_pdf_text(pdf_bytes, max_pages=3)
@@ -1068,7 +1087,7 @@ async def verify(
                         "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                         "DocNroRec": doc_nro_rec or "",
                         "AFIP": "DATOS_INSUFICIENTES",
-                        "Detalle AFIP": f"Faltan campos para WSCDC: {', '.join(missing)}.",
+                        "Detalle AFIP": "Datos insuficientes para validar",
                     }
                 )
                 continue
@@ -1105,13 +1124,7 @@ async def verify(
                             "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                             "DocNroRec": doc_nro_rec or "",
                             "AFIP": "OK" if afip_ok else "NO_CONSTA",
-                            "Detalle AFIP": (
-                                f"WSCDC Resultado={resultado} | Enviado: "
-                                f"CuitEmisor={cuit_emisor} PtoVta={pto_vta} CbteTipo={cbte_tipo} "
-                                f"CbteNro={cbte_nro} CbteFch={cbte_fch_yyyymmdd} "
-                                f"ImpTotal={float(imp_total):.2f} CAE={str(cae_pdf).strip()} "
-                                f"DocTipoRec={doc_tipo_rec or ''} DocNroRec={doc_nro_rec or ''}"
-                            ),
+                            "Detalle AFIP": "Autorizado por AFIP" if afip_ok else "No consta en AFIP",
                         }
                     )
                 else:
@@ -1131,11 +1144,11 @@ async def verify(
                             "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                             "DocNroRec": doc_nro_rec or "",
                             "AFIP": "OK_HTTP",
-                            "Detalle AFIP": "WSCDC respondió 200. No se detectó campo 'Resultado'.",
+                            "Detalle AFIP": "AFIP respondió correctamente",
                         }
                     )
 
-            except Exception as e:
+            except Exception:
                 out_rows.append(
                     {
                         "Archivo": f.filename,
@@ -1152,7 +1165,7 @@ async def verify(
                         "DocTipoRec": str(doc_tipo_rec) if doc_tipo_rec else "",
                         "DocNroRec": doc_nro_rec or "",
                         "AFIP": "ERROR_AFIP",
-                        "Detalle AFIP": str(e)[:2000],
+                        "Detalle AFIP": "Error al validar contra AFIP",
                     }
                 )
 
@@ -1173,7 +1186,7 @@ async def verify(
                     "DocTipoRec": "",
                     "DocNroRec": "",
                     "AFIP": "ERROR",
-                    "Detalle AFIP": str(e)[:1200],
+                    "Detalle AFIP": "Error procesando el PDF",
                 }
             )
 
