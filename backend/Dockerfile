@@ -1,11 +1,13 @@
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     tesseract-ocr \
     tesseract-ocr-spa \
     libzbar0 \
     poppler-utils \
     openssl \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
