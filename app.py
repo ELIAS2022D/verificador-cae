@@ -165,15 +165,15 @@ def chunk_list(items, size: int):
 
 # ===================== SIDEBAR: LOGIN =====================
 with st.sidebar:
-    st.subheader("Login")
+    st.subheader("Acceso")
     api_key = st.session_state.auth["api_key"]
 
-    cuit_login = st.text_input("CUIT", value=st.session_state.auth["cuit"] or LOGIN_CUIT_DEFAULT)
+    cuit_login = st.text_input("CUIT (sin guiones)", value=st.session_state.auth["cuit"] or LOGIN_CUIT_DEFAULT)
     password = st.text_input("Contraseña", type="password")
 
     colA, colB = st.columns(2)
     with colA:
-        if st.button("Ingresar"):
+        if st.button("Ingresar", use_container_width=True):
             try:
                 token = backend_login(BASE_URL, api_key, cuit_login, password)
                 st.session_state.auth = {
@@ -188,7 +188,7 @@ with st.sidebar:
                 st.error(str(e))
 
     with colB:
-        if st.button("Salir"):
+        if st.button("Salir", use_container_width=True):
             st.session_state.auth = {
                 "logged": False,
                 "api_key": DEFAULT_BACKEND_API_KEY,
@@ -197,18 +197,33 @@ with st.sidebar:
             }
             st.rerun()
 
-# STOP si no está logueado
+# ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
-    st.info("Iniciá sesión para habilitar carga y validación.")
+    st.info("Iniciá sesión para comenzar.")
+
+    st.subheader("Cómo funciona")
+    st.write("Seguí estos pasos para validar tus facturas:")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown("**1) Ingresá**\n\nAccedé con tu CUIT y contraseña.")
+    with c2:
+        st.markdown("**2) Subí PDFs/ZIP**\n\nCargá tus facturas en PDF (o un ZIP con PDFs).")
+    with c3:
+        st.markdown("**3) Vista previa**\n\nDetectamos CAE y vencimiento desde el PDF.")
+    with c4:
+        st.markdown("**4) Validación AFIP**\n\nConfirmamos contra AFIP vía WSCDC.")
+
+    st.caption("Consejo: si subís muchos archivos, la validación se procesa automáticamente en tandas para evitar demoras.")
     st.stop()
 
+# ===================== INFO GENERAL =====================
 st.info(
-    "Flujo: extraemos CAE/Vto desde PDF localmente."
-    "La validación AFIP se realiza del lado servidor utilizando el servicio oficial WSCDC (Comprobante Constatar)."
+    "Flujo: detectamos CAE/Vto desde el PDF localmente. "
+    "La validación AFIP se realiza del lado servidor utilizando el servicio oficial WSCDC (ComprobanteConstatar)."
 )
 
 # ===================== CONSUMO DEL MES + ENVÍO EMAIL =====================
-st.subheader("Consumo del mes")
+st.subheader("Resumen de uso del mes")
 
 try:
     usage = backend_usage_current(
@@ -222,40 +237,44 @@ try:
 
     colm1, colm2, colm3 = st.columns(3)
     with colm1:
-        st.metric("PDFs procesados este mes", files_count)
+        st.metric("PDFs procesados", files_count)
     with colm2:
-        st.metric("Requests este mes", requests_count)
+        st.metric("Solicitudes realizadas", requests_count)
     with colm3:
         st.metric("Mes", ym or "-")
 
-    if st.button("Enviar resumen por Gmail"):
-        try:
-            resp = backend_send_usage_email(
-                base_url=BASE_URL,
-                api_key=st.session_state.auth["api_key"],
-                access_token=st.session_state.auth["access_token"],
-            )
-            # Backend puede devolver {"ok": true, "to": "...", "year_month": "...", ...}
-            to_email = resp.get("to") or "(destino configurado en backend)"
-            st.success(f"Email enviado correctamente")
-        except Exception as e:
-            st.error(str(e))
+    cbtn1, cbtn2 = st.columns([1, 3])
+    with cbtn1:
+        if st.button("Enviar resumen por email", use_container_width=True):
+            try:
+                backend_send_usage_email(
+                    base_url=BASE_URL,
+                    api_key=st.session_state.auth["api_key"],
+                    access_token=st.session_state.auth["access_token"],
+                )
+                st.success("Email enviado correctamente.")
+            except Exception as e:
+                st.error(str(e))
 
-except Exception as e:
-    st.warning(f"No pude obtener el consumo: {e}")
+except Exception:
+    st.warning("No pudimos obtener el resumen de uso en este momento. Probá nuevamente en unos segundos.")
 
 st.divider()
 
 # ===================== CARGA ARCHIVOS =====================
-st.subheader("Carga de archivos")
+st.subheader("Carga de facturas")
 
-help_text = "Ilimitado" if MAX_FILES is None else f"Hasta {MAX_FILES}"
-mode = st.radio("Modo de carga", [f"PDFs ({help_text})", f"ZIP (contiene PDFs) ({help_text})"], horizontal=True)
+help_text = "sin límite" if MAX_FILES is None else f"hasta {MAX_FILES}"
+mode = st.radio(
+    "Modo de carga",
+    [f"PDFs ({help_text})", f"ZIP (contiene PDFs) ({help_text})"],
+    horizontal=True
+)
 
 pdf_files = []
 
 if mode.startswith("PDFs"):
-    uploaded = st.file_uploader("Subí facturas en PDF", type=["pdf"], accept_multiple_files=True)
+    uploaded = st.file_uploader("Subí tus facturas en PDF", type=["pdf"], accept_multiple_files=True)
     if uploaded:
         if MAX_FILES is not None and len(uploaded) > MAX_FILES:
             st.warning(f"Subiste {len(uploaded)} PDFs. Por configuración se procesarán solo los primeros {MAX_FILES}.")
@@ -268,7 +287,7 @@ else:
             with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
                 names = [n for n in z.namelist() if n.lower().endswith(".pdf") and not n.endswith("/")]
                 if not names:
-                    st.error("El ZIP no contiene PDFs.")
+                    st.error("No encontramos PDFs dentro del ZIP.")
                 else:
                     if MAX_FILES is not None and len(names) > MAX_FILES:
                         st.warning(f"El ZIP tiene {len(names)} PDFs. Por configuración se procesarán solo {MAX_FILES}.")
@@ -295,11 +314,11 @@ if pdf_files:
             vig_ok = (vto_date is not None and vto_date >= today)
 
             status = []
-            status.append("CAE encontrado" if cae else "CAE NO encontrado")
+            status.append("CAE encontrado" if cae else "CAE no encontrado")
             if fmt_ok:
                 status.append("Formato OK")
             elif cae:
-                status.append("Formato dudoso")
+                status.append("Formato a revisar")
             if vto_date:
                 status.append("Vigente" if vig_ok else "Vencido")
             else:
@@ -318,7 +337,7 @@ if pdf_files:
                 "Archivo": f["name"],
                 "CAE": "",
                 "Vto CAE": "",
-                "Estado": f"Error PDF: {e}",
+                "Estado": f"Error al leer el PDF: {e}",
                 "AFIP": "",
                 "Detalle AFIP": "",
             })
@@ -329,17 +348,18 @@ df = pd.DataFrame(rows) if rows else pd.DataFrame(
     columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]
 )
 
-st.subheader("Vista previa de las facturas")
+st.subheader("Vista previa (datos detectados en el PDF)")
 st.dataframe(df, use_container_width=True)
 
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
-st.subheader("Validación AFIP")
-st.caption("Valida contra AFIP y devuelve el estado por archivo.")
-st.caption(f"Envío en lotes de {BATCH_SIZE} PDFs por request.")
+st.subheader("Validación contra AFIP")
+st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
 
-if st.button("Validar contra AFIP ahora"):
+st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDFs (ajustable).")
+
+if st.button("Validar ahora", use_container_width=True):
     if not pdf_files:
-        st.error("Primero cargá PDFs o ZIP.")
+        st.error("Primero cargá PDFs o un ZIP con PDFs.")
         st.stop()
 
     try:
@@ -358,15 +378,14 @@ if st.button("Validar contra AFIP ahora"):
                 )
                 backend_rows = result.get("rows", [])
                 all_rows.extend(backend_rows)
-
                 batch_progress.progress(idx / len(batches))
 
         if all_rows:
             df = pd.DataFrame(all_rows)
-            st.success("Validación AFIP completada.")
+            st.success("Validación completada.")
             st.dataframe(df, use_container_width=True)
         else:
-            st.warning("No se recibieron resultados del servidor. Por favor, intentá nuevamente en unos segundos.")
+            st.warning("No pudimos obtener resultados del servidor. Probá de nuevo en unos segundos.")
     except Exception as e:
         st.error(str(e))
 
@@ -380,6 +399,7 @@ if not df.empty:
     if "Estado" in df.columns:
         df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
+    st.subheader("Descargas")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -389,6 +409,7 @@ if not df.empty:
             data=csv_bytes,
             file_name="resultado_verificacion_cae.csv",
             mime="text/csv",
+            use_container_width=True,
         )
 
     with col2:
@@ -400,4 +421,5 @@ if not df.empty:
             data=xlsx_buffer.getvalue(),
             file_name="resultado_verificacion_cae.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
