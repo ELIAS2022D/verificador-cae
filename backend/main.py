@@ -77,18 +77,21 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
     return {"access_token": DEMO_ACCESS_TOKEN}
 
-
 # ============================================================
 # USAGE COUNTER (SQLite en disk de Render)
 # ============================================================
-# Alineado con tu ENV: si existe DATABASE_URL, lo usamos como path SQLite
-# (Ej: "usage.db" o "/var/data/usage.db"). Si te pasan una URL postgres,
-# esto NO aplica y deberías migrar a Postgres; por ahora mantenemos SQLite.
-DATABASE_URL = (os.getenv("DATABASE_URL", "") or "").strip()
+# PRIORIDAD:
+# 1) SQLITE_PATH (si lo seteás explícito)
+# 2) Si existe /var/data (Render Disk) => /var/data/usage.db
+# 3) fallback => /tmp/usage.db (efímero)
+SQLITE_PATH = (os.getenv("SQLITE_PATH", "") or "").strip()
 
-SQLITE_PATH = (DATABASE_URL or os.getenv("SQLITE_PATH", "usage.db")).strip()
+if not SQLITE_PATH:
+    if os.path.isdir("/var/data"):
+        SQLITE_PATH = "/var/data/usage.db"
+    else:
+        SQLITE_PATH = "/tmp/usage.db"
 _DB_LOCK = threading.Lock()
-
 
 def _year_month_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
