@@ -10,3 +10,4 @@ pillow==10.4.0
 pyzbar==0.1.9
 pytesseract==0.3.13
 certifi==2024.7.4
+resend

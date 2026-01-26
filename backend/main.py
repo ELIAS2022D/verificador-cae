@@ -28,6 +28,9 @@ from urllib3.poolmanager import PoolManager
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
+# ===== Email (Resend) =====
+import resend
+
 
 # ============================================================
 # FASTAPI
@@ -78,7 +81,12 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 # ============================================================
 # USAGE COUNTER (SQLite en disk de Render)
 # ============================================================
-SQLITE_PATH = os.getenv("SQLITE_PATH", "usage.db").strip()
+# Alineado con tu ENV: si existe DATABASE_URL, lo usamos como path SQLite
+# (Ej: "usage.db" o "/var/data/usage.db"). Si te pasan una URL postgres,
+# esto NO aplica y deberías migrar a Postgres; por ahora mantenemos SQLite.
+DATABASE_URL = (os.getenv("DATABASE_URL", "") or "").strip()
+
+SQLITE_PATH = (DATABASE_URL or os.getenv("SQLITE_PATH", "usage.db")).strip()
 _DB_LOCK = threading.Lock()
 
 
@@ -149,6 +157,87 @@ def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: s
     check_api_key(x_api_key)
     check_bearer(authorization)
     return usage_current()
+
+
+# ============================================================
+# EMAIL REPORT (Alineado a tus ENV actuales)
+# ============================================================
+# ENV según tu screenshot:
+# - EMAIL_PROVIDER=resend
+# - RESEND_API_KEY=...
+# - SMTP_FROM="Verificador CAE <onboarding@resend.dev>"  (lo usamos como FROM)
+# - CLIENT_REPORT_EMAIL=derricoelias@gmail.com           (destinatario)
+EMAIL_PROVIDER = (os.getenv("EMAIL_PROVIDER", "resend") or "").strip().lower()
+RESEND_API_KEY = (os.getenv("RESEND_API_KEY", "") or "").strip()
+SMTP_FROM = (os.getenv("SMTP_FROM", "") or "").strip()
+CLIENT_REPORT_EMAIL = (os.getenv("CLIENT_REPORT_EMAIL", "") or "").strip()
+
+
+def _parse_emails_csv(s: str) -> List[str]:
+    if not s:
+        return []
+    return [e.strip() for e in s.split(",") if e.strip()]
+
+
+def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
+    if EMAIL_PROVIDER != "resend":
+        raise RuntimeError(f"EMAIL_PROVIDER no soportado: {EMAIL_PROVIDER}. Usá 'resend'.")
+
+    if not RESEND_API_KEY:
+        raise RuntimeError("Falta RESEND_API_KEY en variables de entorno.")
+    if not SMTP_FROM:
+        raise RuntimeError("Falta SMTP_FROM en variables de entorno (From verificado/permitido por Resend).")
+
+    to_list = _parse_emails_csv(CLIENT_REPORT_EMAIL)
+    if not to_list:
+        raise RuntimeError("Falta CLIENT_REPORT_EMAIL (destinatario) en variables de entorno.")
+
+    resend.api_key = RESEND_API_KEY
+
+    ym = usage.get("year_month") or "-"
+    files_count = int(usage.get("files_count", 0) or 0)
+    requests_count = int(usage.get("requests_count", 0) or 0)
+    updated_at = usage.get("updated_at") or "-"
+
+    subject = f"Resumen de uso - {ym} (Verificador CAE)"
+    text = (
+        f"Resumen de uso - {ym}\n"
+        f"PDFs procesados: {files_count}\n"
+        f"Solicitudes realizadas: {requests_count}\n"
+        f"Actualizado: {updated_at}\n"
+    )
+    html = f"""
+    <div style="font-family: Arial, sans-serif; line-height: 1.4;">
+      <h2>Resumen de uso - {ym}</h2>
+      <ul>
+        <li><b>PDFs procesados:</b> {files_count}</li>
+        <li><b>Solicitudes realizadas:</b> {requests_count}</li>
+        <li><b>Actualizado:</b> {updated_at}</li>
+      </ul>
+    </div>
+    """
+
+    params: resend.Emails.SendParams = {
+        "from": SMTP_FROM,
+        "to": to_list,
+        "subject": subject,
+        "text": text,
+        "html": html,
+    }
+
+    resp = resend.Emails.send(params)
+    return {"ok": True, "provider": "resend", "to": to_list, "resend": resp}
+
+
+@app.post("/usage/email")
+def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+    u = usage_current()
+    try:
+        return send_usage_report_email(u)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================
@@ -850,7 +939,6 @@ async def verify(
                         cae_pdf = str(qr.get("codAut")).strip()
 
                     # ✅ Receptor desde QR (cuando existe)
-                    # (en el esquema QR AFIP suele venir tipoDocRec / nroDocRec)
                     q_tipo_doc = qr.get("tipoDocRec")
                     q_nro_doc = qr.get("nroDocRec")
                     if q_tipo_doc is not None and q_nro_doc is not None:
@@ -859,10 +947,8 @@ async def verify(
                     pass
 
             # ✅ Guardias finales contra falsos positivos:
-            # - si ImpTotal quedó igual al CAE (caso que viste en tu screenshot) => invalidarlo
             if cae_pdf and imp_total is not None:
                 try:
-                    # comparamos contra parte entera para tolerar .00
                     if str(int(round(float(imp_total)))) == str(cae_pdf).strip():
                         imp_total = None
                 except Exception:
@@ -936,7 +1022,6 @@ async def verify(
             require_receptor = (factura_letra == "A")
 
             # ✅ Para FACTURA A: si el QR no trajo receptor, NO usar DNI “por defecto”.
-            # Exigimos CUIT receptor (DocTipo=80) para evitar rechazos R por receptor inválido.
             if require_receptor:
                 if doc_tipo_rec != 80:
                     doc_tipo_rec, doc_nro_rec = None, None
