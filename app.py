@@ -8,8 +8,28 @@ import streamlit as st
 import pdfplumber
 import requests
 
-# ===================== CONFIG =====================
-st.set_page_config(page_title="Verificador CAE", layout="wide")
+# ===================== BRANDING + CONFIG =====================
+st.set_page_config(
+    page_title="LexaCAE | Verificador AFIP",
+    page_icon="🧾",  # podés cambiar por "assets/favicon.png"
+    layout="wide",
+)
+
+# Header con logo + nombre
+col1, col2 = st.columns([1, 6])
+with col1:
+    try:
+        st.image("assets/logo.png", width=70)
+    except Exception:
+        # si no existe el archivo, no frenamos la app
+        pass
+with col2:
+    st.markdown("## LexaCAE")
+    st.caption("Verificación oficial de CAE contra AFIP (WSCDC)")
+
+st.divider()
+
+# ===================== CONFIG APP =====================
 st.title("Verificador de CAE")
 
 BASE_URL = st.secrets.get("BASE_URL", "")
@@ -20,6 +40,7 @@ LOGIN_CUIT_DEFAULT = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
 MAX_FILES_RAW = st.secrets.get("MAX_FILES", None)
 BATCH_SIZE = int(st.secrets.get("BATCH_SIZE", 50))
 
+
 def _parse_int_or_none(x):
     try:
         if x is None:
@@ -29,6 +50,7 @@ def _parse_int_or_none(x):
         return int(x)
     except Exception:
         return None
+
 
 MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
 
@@ -55,6 +77,7 @@ VTO_PATTERNS = [
     ),
 ]
 
+
 def find_first(patterns, text: str):
     for pat in patterns:
         m = pat.search(text)
@@ -68,6 +91,7 @@ def find_first(patterns, text: str):
             return m2.group(1)
     return None
 
+
 def parse_date(date_str: str):
     if not date_str:
         return None
@@ -79,8 +103,10 @@ def parse_date(date_str: str):
             pass
     return None
 
+
 def basic_format_ok(cae: str) -> bool:
     return bool(cae and re.fullmatch(r"\d{14}", cae))
+
 
 def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -88,6 +114,7 @@ def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
         for page in pdf.pages[:max_pages]:
             texts.append(page.extract_text() or "")
         return "\n".join(texts)
+
 
 # ===================== SESSION STATE =====================
 def ensure_auth_state():
@@ -98,6 +125,7 @@ def ensure_auth_state():
             "access_token": "",
             "cuit": ""
         }
+
 
 ensure_auth_state()
 
@@ -117,6 +145,7 @@ def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
         raise RuntimeError("Login OK pero el backend no devolvió access_token.")
     return token
 
+
 def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: list, timeout_s: int = 180):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
@@ -134,6 +163,7 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
         raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
     return r.json()
 
+
 def backend_usage_current(base_url: str, api_key: str, access_token: str):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
@@ -142,6 +172,7 @@ def backend_usage_current(base_url: str, api_key: str, access_token: str):
     if r.status_code != 200:
         raise RuntimeError(f"Usage falló ({r.status_code}): {r.text}")
     return r.json()
+
 
 def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
     """
@@ -158,10 +189,12 @@ def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
         raise RuntimeError(f"Enviar email falló ({r.status_code}): {r.text}")
     return r.json()
 
+
 def chunk_list(items, size: int):
     if size <= 0:
         return [items]
-    return [items[i:i+size] for i in range(0, len(items), size)]
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
 
 # ===================== SIDEBAR: LOGIN =====================
 with st.sidebar:
@@ -199,15 +232,6 @@ with st.sidebar:
 
 # ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
-    # ---- Top bar: botón planes arriba a la derecha ----
-    top_left, top_right = st.columns([6, 1])
-    with top_right:
-        if st.button("💳 Ver planes", use_container_width=True):
-            try:
-                st.switch_page("pages/1_Planes.py")
-            except Exception:
-                st.warning("No se encontró la página de Planes. Creá 'pages/1_Planes.py' en tu repo.")
-
     st.info("Iniciá sesión para comenzar.")
 
     st.subheader("Cómo funciona")
