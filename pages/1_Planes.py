@@ -1,11 +1,10 @@
 import os
 import streamlit as st
-from urllib.parse import quote
 
-st.set_page_config(page_title="Planes | Verificador CAE", layout="wide")
+st.set_page_config(page_title="Tarifas | lexaCAE", layout="wide")
 
 # =========================================================
-# Config resolver: Render ENV first, then Streamlit secrets (if exists)
+# Config resolver: Render ENV first, then Streamlit secrets
 # =========================================================
 def cfg(key: str, default: str = "") -> str:
     v = os.getenv(key)
@@ -20,17 +19,11 @@ def cfg(key: str, default: str = "") -> str:
 # Helpers
 # =========================================================
 def money_ar(n: int) -> str:
-    # 12041 -> "12.041"
     return f"{n:,}".replace(",", ".")
 
-def go(url: str):
-    # navegación simple (Streamlit multipage o external)
-    st.markdown(f"<meta http-equiv='refresh' content='0; url={url}'>", unsafe_allow_html=True)
-
 # =========================================================
-# Config (enchufás tus URLs o HTML)
+# Config (URLs)
 # =========================================================
-# Opción A (recomendada): links directos a MP por plan (Checkout Pro)
 MP_LINKS = {
     "pack_50_m":  (cfg("MP_PACK_50_M_URL",  "") or "").strip(),
     "pack_150_m": (cfg("MP_PACK_150_M_URL", "") or "").strip(),
@@ -42,77 +35,236 @@ MP_LINKS = {
     "pack_500_a": (cfg("MP_PACK_500_A_URL", "") or "").strip(),
 }
 
-# Opción B (si ya tenés HTML/JS y querés embed): lo podés guardar en ENV o secrets
+# Opción B (si ya tenés HTML/JS y querés embed)
 MP_EMBED_HTML = (cfg("MP_EMBED_HTML", "") or "").strip()
 
 # URL de tu login (si usás multipage de Streamlit, esto suele ser "/")
 LOGIN_URL = (cfg("LOGIN_URL", "/") or "/").strip()
 
+# Anchors / Links del navbar
+TARIFAS_URL = (cfg("TARIFAS_URL", "#planes") or "#planes").strip()
+
+# Path local dentro del repo (NO usar D:\... en producción)
+HERO_IMAGE_PATH = (cfg("HERO_IMAGE_PATH", "assets/mujerAdmin.jpeg") or "assets/mujerAdmin.jpeg").strip()
+
 # =========================================================
-# Estilos
+# CSS (look & feel como el mock)
 # =========================================================
 st.markdown(
     """
 <style>
-/* ancho y padding */
-.block-container { padding-top: 2.2rem; padding-bottom: 2.5rem; max-width: 1200px; }
+/* layout general */
+.block-container{
+  padding: 0 !important;
+  max-width: 100% !important;
+}
+section[data-testid="stSidebar"]{ display:none; }
+header[data-testid="stHeader"]{ background: transparent; }
+div[data-testid="stToolbar"]{ display:none; }
 
-/* header */
-h1.title { text-align:center; font-size: 2.4rem; margin-bottom: 0.2rem; }
-p.subtitle { text-align:center; color: #6b7280; margin-top: 0; }
+/* colores */
+:root{
+  --blue:#0b4fb3;
+  --blue-dark:#083a86;
+  --bg-soft:#eaf4ff;
+  --card:#ffffff;
+  --text:#0f172a;
+  --muted:#475569;
+  --border: rgba(15, 23, 42, 0.12);
+}
+
+/* navbar */
+.navbar{
+  width:100%;
+  background: var(--blue);
+  padding: 14px 26px;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+}
+.brand{
+  color:#fff;
+  font-weight:800;
+  font-size: 22px;
+  letter-spacing: 0.2px;
+}
+.navlinks{
+  display:flex;
+  gap:18px;
+  align-items:center;
+}
+.navlinks a{
+  color:#dbeafe;
+  text-decoration:none;
+  font-weight:600;
+  font-size: 14px;
+}
+.navlinks a:hover{ color:#fff; }
+.loginbtn{
+  color:#fff !important;
+  border: 2px solid rgba(255,255,255,.75);
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-weight: 800;
+}
+
+/* hero */
+.hero-wrap{
+  width:100%;
+  background: #ffffff;
+  padding: 34px 26px 18px 26px;
+}
+.hero-inner{
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.hero-title{
+  font-size: 34px;
+  font-weight: 900;
+  color: var(--text);
+  margin: 4px 0 8px 0;
+}
+.hero-sub{
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--blue);
+  margin: 0 0 12px 0;
+}
+.hero-p{
+  color: var(--muted);
+  line-height: 1.6;
+  font-size: 14px;
+  max-width: 650px;
+}
+.how{
+  margin-top: 16px;
+}
+.how h4{
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 900;
+}
+.how ol{
+  margin: 0 0 10px 18px;
+  color: var(--text);
+  font-size: 13px;
+}
+.hero-note{
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 700;
+}
+.cta{
+  margin-top: 16px;
+  display:inline-block;
+  padding: 11px 18px;
+  border-radius: 999px;
+  border: 2px solid rgba(11,79,179,.35);
+  background: #fff;
+  color: var(--blue-dark);
+  font-weight: 900;
+  text-decoration:none;
+}
+.cta:hover{
+  background: rgba(11,79,179,.06);
+}
+
+/* Se intenta estilizar la imagen de st.image */
+.hero-img-wrap img{
+  border-radius: 16px !important;
+  object-fit: cover;
+  box-shadow: 0 18px 45px rgba(2, 6, 23, 0.12);
+  border: 1px solid rgba(2, 6, 23, 0.08);
+}
+
+/* sección planes */
+.plans-wrap{
+  width:100%;
+  background: var(--bg-soft);
+  padding: 40px 26px 46px 26px;
+  border-top: 6px solid rgba(11,79,179,.20);
+}
+.plans-inner{
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.plans-title{
+  text-align:center;
+  font-size: 30px;
+  font-weight: 900;
+  color: var(--text);
+  margin: 0 0 10px 0;
+}
 
 /* cards */
 .plan-card{
-  border: 1px solid rgba(148, 163, 184, 0.30);
-  border-radius: 18px;
-  padding: 18px 18px 14px 18px;
-  background: rgba(255,255,255,0.03);
-  box-shadow: 0 10px 30px rgba(0,0,0,0.10);
-  min-height: 385px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 18px 16px 18px;
+  box-shadow: 0 14px 35px rgba(2, 6, 23, 0.08);
+  position: relative;
 }
-.badge{
-  display:inline-block;
-  font-size: 12px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(34, 197, 94, 0.14);
-  color: rgb(34, 197, 94);
-  border: 1px solid rgba(34, 197, 94, 0.25);
-  margin-bottom: 8px;
+.plan-topline{
+  height: 3px;
+  background: rgba(11,79,179,.18);
+  margin: 8px 0 14px 0;
 }
-.badge-star{
-  background: rgba(168, 85, 247, 0.14);
-  color: rgb(168, 85, 247);
-  border: 1px solid rgba(168, 85, 247, 0.25);
+.plan-name{
+  font-size: 20px;
+  font-weight: 900;
+  color: var(--blue-dark);
+  margin: 0 0 4px 0;
 }
-.price{
-  font-size: 2.2rem;
+.plan-price{
+  font-size: 26px;
+  font-weight: 950;
+  margin: 8px 0 6px 0;
+  color: #111827;
+}
+.plan-muted{
+  font-size: 13px;
+  color: #334155;
+  font-weight: 700;
+}
+.plan-meta{
+  margin-top: 12px;
+  font-size: 13px;
+  color: #111827;
   font-weight: 800;
-  margin: 10px 0 0 0;
 }
-.muted{ color: #6b7280; margin-top: 2px; }
-.hr{ height: 1px; background: rgba(148, 163, 184, 0.25); margin: 14px 0; }
-.feature{ margin: 8px 0; }
-.small{ font-size: 0.92rem; color: #9ca3af; }
 
-/* boton top-right */
-.topbar{
+.popular-ribbon{
+  position:absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 26px;
+  border-top-left-radius: 14px;
+  border-top-right-radius: 14px;
+  background: #0b2d57;
+  color:#fff;
+  font-weight: 900;
+  font-size: 12px;
   display:flex;
-  justify-content: space-between;
   align-items:center;
-  margin-bottom: 0.6rem;
+  justify-content:center;
 }
-.topbar a{
-  text-decoration:none;
+.popular{
+  border: 2px solid rgba(11,79,179,.35);
 }
-.topbar .backbtn{
-  padding: 8px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(148,163,184,0.35);
-  background: rgba(255,255,255,0.04);
-  color: #e5e7eb;
-  font-weight: 600;
-  display:inline-block;
+
+/* checkout box */
+.checkout{
+  max-width: 1200px;
+  margin: 26px auto 0 auto;
+  padding: 0 2px;
+}
+
+/* responsive */
+@media (max-width: 1020px){
+  .hero-title{ font-size: 28px; }
 }
 </style>
 """,
@@ -120,132 +272,180 @@ p.subtitle { text-align:center; color: #6b7280; margin-top: 0; }
 )
 
 # =========================================================
-# Top bar
+# Navbar
 # =========================================================
 st.markdown(
     f"""
-<div class="topbar">
-  <div></div>
-  <a href="{LOGIN_URL}">
-    <span class="backbtn">← Volver al login</span>
-  </a>
+<div class="navbar">
+  <div class="brand">lexaCAE</div>
+  <div class="navlinks">
+    <a href="{TARIFAS_URL}">Tarifas</a>
+    <a class="loginbtn" href="{LOGIN_URL}">LOGIN</a>
+  </div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
 # =========================================================
-# Header
+# HERO (texto + imagen local assets/)
 # =========================================================
-st.markdown("<h1 class='title'>Elegí el plan ideal para tu negocio</h1>", unsafe_allow_html=True)
 st.markdown(
-    "<p class='subtitle'>Planes mensuales y anuales. Validación oficial AFIP (WSCDC). Soporte incluido.</p>",
+    """
+<div class="hero-wrap">
+  <div class="hero-inner">
+</div>
+""",
     unsafe_allow_html=True,
 )
 
-st.write("")
-col_t1, col_t2, col_t3 = st.columns([4, 2, 4])
-with col_t2:
+hero_l, hero_r = st.columns([1.1, 0.9], gap="large")
+
+with hero_l:
+    st.markdown(
+        """
+        <div class="hero-title">Verificación de CAE de Facturas AFIP en segundos.</div>
+        <div class="hero-sub">Servicio de validación de CAE para facturas electrónicas</div>
+        <div class="hero-p">
+          Nuestro sistema permite verificar CAE de facturas AFIP, confirmando que el comprobante fue autorizado correctamente.
+          Ideal para empresas que necesitan validar facturas recibidas, evitar comprobantes apócrifos y reducir riesgos impositivos.
+        </div>
+
+        <div class="how">
+          <h4>¿Cómo funciona?</h4>
+          <ol>
+            <li>Subí una o varias facturas electrónicas</li>
+            <li>El sistema lee los datos fiscales (CUIT, punto de venta, número, CAE)</li>
+            <li>Se consulta automáticamente a AFIP</li>
+            <li>Obtenés el resultado de <b>CAE válido</b> o <b>inválido</b></li>
+          </ol>
+          <div class="hero-note">Proceso rápido, automático y online.</div>
+        </div>
+
+        <a class="cta" href="#planes">Conocé nuestros Planes</a>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with hero_r:
+    st.markdown("<div class='hero-img-wrap'>", unsafe_allow_html=True)
+    st.image(HERO_IMAGE_PATH, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("</div></div>", unsafe_allow_html=True)
+
+# =========================================================
+# PLANES (sección celeste + título)
+# =========================================================
+st.markdown('<div id="planes"></div>', unsafe_allow_html=True)
+
+st.markdown(
+    """
+<div class="plans-wrap">
+  <div class="plans-inner">
+    <div class="plans-title">Una solución para cada necesidad</div>
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# Para que el contenido quede sobre el fondo celeste
+st.markdown("<div class='plans-wrap'><div class='plans-inner'>", unsafe_allow_html=True)
+
+c1, c2, c3 = st.columns([3, 2.2, 3])
+with c2:
     anual = st.toggle("Planes anuales (Ahorrá 25%)", value=False)
 
-st.write("")
-st.divider()
-
-# =========================================================
-# Planes
-# =========================================================
+# Planes (mantenemos tu pricing + lógica MP)
 plans = [
     {
         "id": "pack_50",
-        "title": "Pack 50",
+        "title": "Starter",
         "monthly": 12041,
         "annual": 9031,
-        "badge": "Ideal para empezar",
+        "qty": "50 facturas",
         "featured": False,
-        "features": [
-            "50 comprobantes / mes",
-            "3 usuarios",
-            "Asistencia en trámite AFIP",
-            "Reportes + Libro IVA",
-        ],
     },
     {
         "id": "pack_150",
-        "title": "Pack 150",
+        "title": "Pro",
         "monthly": 24423,
         "annual": 18317,
-        "badge": "Más elegido",
+        "qty": "150 facturas",
         "featured": False,
-        "features": [
-            "150 comprobantes / mes",
-            "Usuarios ilimitados",
-            "Soporte email y teléfono",
-            "Integraciones e-commerce",
-        ],
     },
     {
         "id": "pack_300",
-        "title": "Pack 300",
+        "title": "Advance",
         "monthly": 32987,
         "annual": 24740,
-        "badge": "Recomendado ⭐",
-        "featured": True,
-        "features": [
-            "300 comprobantes / mes",
-            "Usuarios ilimitados",
-            "Prioridad en soporte",
-            "Facturación masiva por lote",
-        ],
+        "qty": "300 facturas",
+        "featured": True,   # “Más popular”
     },
     {
         "id": "pack_500",
-        "title": "Pack 500",
+        "title": "Enterprise",
         "monthly": 40614,
         "annual": 30460,
-        "badge": "Para alto volumen",
+        "qty": "500+ facturas",
         "featured": False,
-        "features": [
-            "500 comprobantes / mes",
-            "Usuarios ilimitados",
-            "Soporte dedicado",
-            "Integración API",
-        ],
+        "enterprise": True,
     },
 ]
 
-cols = st.columns(4)
+cols = st.columns(4, gap="large")
 
 for idx, p in enumerate(plans):
     with cols[idx]:
-        price = p["annual"] if anual else p["monthly"]
         period = "año" if anual else "mes"
-        badge_class = "badge badge-star" if p["featured"] else "badge"
 
-        st.markdown("<div class='plan-card'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='{badge_class}'>{p['badge']}</div>", unsafe_allow_html=True)
-        st.markdown(f"### {p['title']}")
-        st.markdown(f"<div class='price'>$ {money_ar(price)}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='muted'>+ IVA / {period}</div>", unsafe_allow_html=True)
-        st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+        is_enterprise = bool(p.get("enterprise", False))
+        if is_enterprise:
+            st.markdown(
+                f"""
+<div class="plan-card">
+  <div class="plan-name">{p["title"]}</div>
+  <div class="plan-topline"></div>
+  <div class="plan-meta">Solución a medida</div>
+  <div style="height: 10px;"></div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+            if st.button("Obtené una cotización", use_container_width=True, key="quote_enterprise"):
+                st.session_state["mp_plan"] = p["id"]
+                st.session_state["mp_is_annual"] = bool(anual)
 
-        for feat in p["features"]:
-            st.markdown(f"<div class='feature'>✅ {feat}</div>", unsafe_allow_html=True)
+        else:
+            price = p["annual"] if anual else p["monthly"]
+            popular = "popular" if p["featured"] else ""
 
-        st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-        st.caption("Pago seguro con Mercado Pago. Activación inmediata.")
-        buy_label = "Comprar anual" if anual else "Comprar mensual"
+            st.markdown(
+                f"""
+<div class="plan-card {popular}">
+  {"<div class='popular-ribbon'>Más popular</div>" if p["featured"] else ""}
+  <div style="height:{'22px' if p["featured"] else '0px'};"></div>
+  <div class="plan-name">{p["title"]}</div>
+  <div class="plan-topline"></div>
+  <div class="plan-price">$ {money_ar(price)} / {period}</div>
+  <div class="plan-muted">{p["qty"]}</div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
-        if st.button(buy_label, use_container_width=True, key=f"buy_{p['id']}_{'a' if anual else 'm'}"):
-            st.session_state["mp_plan"] = p["id"]
-            st.session_state["mp_is_annual"] = bool(anual)
+            if st.button("Conseguir", use_container_width=True, key=f"buy_{p['id']}_{'a' if anual else 'm'}"):
+                st.session_state["mp_plan"] = p["id"]
+                st.session_state["mp_is_annual"] = bool(anual)
 
-        st.markdown("</div>", unsafe_allow_html=True)
-
-st.divider()
+st.markdown("</div></div>", unsafe_allow_html=True)
 
 # =========================================================
 # Checkout Mercado Pago
 # =========================================================
+st.markdown("<div class='checkout'>", unsafe_allow_html=True)
+
 if st.session_state.get("mp_plan"):
     plan_id = st.session_state["mp_plan"]
     is_annual = st.session_state.get("mp_is_annual", False)
@@ -257,13 +457,13 @@ if st.session_state.get("mp_plan"):
     link_key = f"{plan_id}_{suffix}"
     mp_url = (MP_LINKS.get(link_key) or "").strip()
 
-    # -------- Opción A: Link directo (recomendada) --------
+    # Opción A: Link directo
     if mp_url:
         st.markdown(
             f"""
             <a href="{mp_url}" target="_blank" style="text-decoration:none;">
               <div style="padding:14px 16px;border-radius:14px;border:1px solid rgba(148,163,184,.35);
-                          background: rgba(34,197,94,.12); display:inline-block; font-weight:700;">
+                          background: rgba(34,197,94,.12); display:inline-block; font-weight:800;">
                 Ir a Mercado Pago →
               </div>
             </a>
@@ -272,7 +472,7 @@ if st.session_state.get("mp_plan"):
         )
         st.caption("Si no se abre, habilitá pop-ups o abrilo desde otra pestaña.")
     else:
-        # -------- Opción B: Embed HTML/JS (si lo tenés funcionando) --------
+        # Opción B: Embed HTML
         if MP_EMBED_HTML:
             st.info("Cargando checkout embebido…")
             st.components.v1.html(MP_EMBED_HTML, height=650, scrolling=True)
@@ -289,3 +489,5 @@ if st.session_state.get("mp_plan"):
         st.session_state.pop("mp_plan", None)
         st.session_state.pop("mp_is_annual", None)
         st.rerun()
+
+st.markdown("</div>", unsafe_allow_html=True)
