@@ -10,6 +10,7 @@ import requests
 
 # ===================== CONFIG =====================
 st.set_page_config(page_title="Verificador CAE", layout="wide")
+st.title("Verificador de CAE")
 
 BASE_URL = st.secrets.get("BASE_URL", "")
 DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
@@ -34,329 +35,6 @@ MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
 if not BASE_URL:
     st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
     st.stop()
-
-# ===================== UI: ESTILO PRO (LOGIN + LOAD) =====================
-def inject_modern_ui():
-    css = """
-    <style>
-      /* ===================== Base ===================== */
-      .stApp {
-        background:
-          radial-gradient(1200px circle at 18% 12%, rgba(255, 179, 0, .14), transparent 55%),
-          radial-gradient(900px circle at 75% 18%, rgba(255, 60, 120, .16), transparent 55%),
-          radial-gradient(1000px circle at 62% 86%, rgba(130, 80, 255, .14), transparent 60%),
-          #0b0b0f !important;
-        color: rgba(255,255,255,.92) !important;
-      }
-
-      /* Ocultar elementos de Streamlit */
-      #MainMenu, header, footer { visibility: hidden; height: 0; }
-      [data-testid="stToolbar"] { display: none; }
-      [data-testid="stStatusWidget"] { display: none; }
-
-      /* Un poco más “clean” */
-      .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
-
-      /* ===================== Animaciones suaves ===================== */
-      @keyframes vc_in {
-        from { opacity:0; transform: translateY(10px) scale(.985); }
-        to   { opacity:1; transform: translateY(0) scale(1); }
-      }
-
-      .vc-animate {
-        animation: vc_in .42s cubic-bezier(.2,.9,.2,1) both;
-      }
-
-      /* ===================== Login layout (centrado) ===================== */
-      .vc-wrap{
-        min-height: calc(100vh - 120px);
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        padding: 24px 16px;
-      }
-
-      .vc-card{
-        width: min(660px, 96vw);
-        background: rgba(18, 18, 24, .78);
-        border: 1px solid rgba(255,255,255,.10);
-        box-shadow: 0 24px 90px rgba(0,0,0,.55);
-        border-radius: 18px;
-        padding: 28px 26px;
-        position: relative;
-        backdrop-filter: blur(14px);
-        -webkit-backdrop-filter: blur(14px);
-        overflow: hidden;
-      }
-
-      .vc-card:before{
-        content:"";
-        position:absolute;
-        inset:-2px;
-        border-radius: 20px;
-        background: linear-gradient(90deg,
-          rgba(255,179,0,.35),
-          rgba(255,60,120,.32),
-          rgba(130,80,255,.34)
-        );
-        filter: blur(22px);
-        opacity: .30;
-        z-index: 0;
-      }
-      .vc-card > * { position: relative; z-index: 1; }
-
-      .vc-brand{
-        display:flex;
-        align-items:center;
-        gap: 12px;
-        margin-bottom: 10px;
-      }
-      .vc-logo{
-        width: 38px;
-        height: 38px;
-        border-radius: 12px;
-        background: linear-gradient(135deg,
-          rgba(255,179,0,.95),
-          rgba(255,60,120,.90),
-          rgba(130,80,255,.88)
-        );
-        box-shadow: 0 16px 40px rgba(0,0,0,.45);
-      }
-      .vc-title{
-        font-size: 30px;
-        font-weight: 820;
-        letter-spacing: .2px;
-        margin: 0;
-        line-height: 1.05;
-      }
-      .vc-sub{
-        margin: 6px 0 18px 0;
-        color: rgba(255,255,255,.66);
-        font-size: 13.5px;
-        line-height: 1.45;
-      }
-
-      .vc-chiprow{
-        display:flex;
-        gap: 8px;
-        flex-wrap: wrap;
-        margin-top: 10px;
-        margin-bottom: 16px;
-      }
-      .vc-chip{
-        display:inline-flex;
-        gap:8px;
-        align-items:center;
-        padding: 6px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(255,255,255,.10);
-        background: rgba(255,255,255,.04);
-        font-size: 12px;
-        color: rgba(255,255,255,.72);
-      }
-
-      .vc-grid{
-        display:grid;
-        grid-template-columns: 1.05fr .95fr;
-        gap: 16px;
-      }
-      @media (max-width: 920px){
-        .vc-grid{ grid-template-columns: 1fr; }
-      }
-
-      .vc-panel{
-        border: 1px solid rgba(255,255,255,.08);
-        background: rgba(255,255,255,.03);
-        border-radius: 16px;
-        padding: 16px 14px;
-      }
-      .vc-panel h3{
-        margin: 0 0 8px 0;
-        font-size: 16px;
-        font-weight: 760;
-        color: rgba(255,255,255,.92);
-      }
-      .vc-steps{
-        display:grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-        margin-top: 8px;
-      }
-      @media (max-width: 920px){
-        .vc-steps{ grid-template-columns: 1fr; }
-      }
-      .vc-step{
-        border: 1px solid rgba(255,255,255,.08);
-        background: rgba(0,0,0,.18);
-        border-radius: 14px;
-        padding: 12px 12px;
-      }
-      .vc-step b{ display:block; font-size: 13px; margin-bottom: 4px; }
-      .vc-step span{ color: rgba(255,255,255,.66); font-size: 12.5px; line-height: 1.35; }
-
-      /* ===================== Inputs (global) ===================== */
-      .stTextInput input, .stPassword input{
-        background: rgba(255,255,255,.05) !important;
-        border: 1px solid rgba(255,255,255,.10) !important;
-        color: rgba(255,255,255,.92) !important;
-        border-radius: 12px !important;
-        padding: 12px 12px !important;
-        transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
-      }
-      .stTextInput input:focus, .stPassword input:focus{
-        border-color: rgba(255,179,0,.45) !important;
-        box-shadow: 0 0 0 4px rgba(255,179,0,.10) !important;
-        transform: translateY(-1px);
-      }
-      label, .stTextInput label, .stPassword label{
-        color: rgba(255,255,255,.70) !important;
-        font-size: 12px !important;
-      }
-
-      /* ===================== Buttons (global) ===================== */
-      .stButton button{
-        border: 1px solid rgba(255,255,255,.12) !important;
-        background: linear-gradient(90deg,
-          rgba(255,179,0,.90),
-          rgba(255,60,120,.88),
-          rgba(130,80,255,.86)
-        ) !important;
-        color: #0b0b0f !important;
-        font-weight: 820 !important;
-        border-radius: 12px !important;
-        padding: 12px 14px !important;
-        transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
-        box-shadow: 0 14px 30px rgba(0,0,0,.35);
-      }
-      .stButton button:hover{
-        transform: translateY(-1px) scale(1.01);
-        filter: brightness(1.03);
-      }
-      .stButton button:active{
-        transform: translateY(0px) scale(.995);
-      }
-
-      /* ===================== Sidebar “prolijo” ===================== */
-      [data-testid="stSidebar"]{
-        background: rgba(18, 18, 24, .45) !important;
-        border-right: 1px solid rgba(255,255,255,.08);
-        backdrop-filter: blur(10px);
-      }
-      [data-testid="stSidebar"] .stMarkdown,
-      [data-testid="stSidebar"] label,
-      [data-testid="stSidebar"] span,
-      [data-testid="stSidebar"] p {
-        color: rgba(255,255,255,.86) !important;
-      }
-
-      /* ===================== Overlay de carga ===================== */
-      .vc-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 99999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: rgba(8, 8, 12, .62);
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        animation: vc_fade .20s ease-out both;
-      }
-      @keyframes vc_fade{
-        from { opacity:0; }
-        to   { opacity:1; }
-      }
-      .vc-overlay-card{
-        width: min(520px, 92vw);
-        background: rgba(18, 18, 24, .82);
-        border: 1px solid rgba(255,255,255,.10);
-        box-shadow: 0 24px 90px rgba(0,0,0,.6);
-        border-radius: 18px;
-        padding: 22px 20px;
-        position: relative;
-        overflow: hidden;
-      }
-      .vc-overlay-card:before{
-        content:"";
-        position:absolute;
-        inset:-2px;
-        border-radius: 20px;
-        background: linear-gradient(90deg,
-          rgba(255,179,0,.32),
-          rgba(255,60,120,.28),
-          rgba(130,80,255,.30)
-        );
-        filter: blur(24px);
-        opacity: .28;
-      }
-      .vc-overlay-card > * { position: relative; z-index: 1; }
-
-      .vc-spin{
-        width: 54px; height: 54px;
-        border-radius: 999px;
-        border: 4px solid rgba(255,255,255,.14);
-        border-top-color: rgba(255,179,0,.92);
-        animation: vc_spin 1s linear infinite;
-        margin: 8px auto 10px auto;
-      }
-      @keyframes vc_spin{ to { transform: rotate(360deg); } }
-
-      .vc-overlay-title{
-        text-align:center;
-        font-size: 16px;
-        font-weight: 780;
-        margin: 0 0 6px 0;
-      }
-      .vc-overlay-sub{
-        text-align:center;
-        color: rgba(255,255,255,.66);
-        font-size: 12.5px;
-        margin: 0;
-      }
-      .vc-progressbar{
-        height: 8px;
-        border-radius: 999px;
-        background: rgba(255,255,255,.10);
-        overflow: hidden;
-        margin-top: 14px;
-      }
-      .vc-progressbar > div{
-        height: 100%;
-        width: 45%;
-        border-radius: 999px;
-        background: linear-gradient(90deg,
-          rgba(255,179,0,.90),
-          rgba(255,60,120,.86),
-          rgba(130,80,255,.84)
-        );
-        animation: vc_load 1.0s ease-in-out infinite alternate;
-      }
-      @keyframes vc_load{
-        from { transform: translateX(-20%); width: 35%; }
-        to   { transform: translateX(40%);  width: 60%; }
-      }
-    </style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
-
-inject_modern_ui()
-
-# ===================== OVERLAY HELPERS =====================
-def show_loading_overlay(placeholder, title: str, subtitle: str = ""):
-    html = f"""
-    <div class="vc-overlay">
-      <div class="vc-overlay-card">
-        <div class="vc-spin"></div>
-        <p class="vc-overlay-title">{title}</p>
-        <p class="vc-overlay-sub">{subtitle}</p>
-        <div class="vc-progressbar"><div></div></div>
-      </div>
-    </div>
-    """
-    placeholder.markdown(html, unsafe_allow_html=True)
-
-def hide_loading_overlay(placeholder):
-    placeholder.empty()
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
@@ -485,43 +163,17 @@ def chunk_list(items, size: int):
         return [items]
     return [items[i:i+size] for i in range(0, len(items), size)]
 
-# ===================== LOGIN SCREEN (PRO) =====================
-def render_login_screen():
-    st.markdown('<div class="vc-wrap vc-animate"><div class="vc-card">', unsafe_allow_html=True)
-
-    st.markdown(
-        """
-        <div class="vc-brand">
-          <div class="vc-logo"></div>
-          <div>
-            <h1 class="vc-title">Verificador de CAE</h1>
-            <div class="vc-sub">Workspace seguro para validar facturas y confirmar CAE contra AFIP (WSCDC).</div>
-          </div>
-        </div>
-        <div class="vc-chiprow">
-          <div class="vc-chip">🔒 Acceso con token</div>
-          <div class="vc-chip">⚡ Procesamiento por tandas</div>
-          <div class="vc-chip">✅ Validación AFIP</div>
-          <div class="vc-chip">📄 PDF / ZIP</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.markdown('<div class="vc-grid">', unsafe_allow_html=True)
-
-    # Panel izquierda: Login
-    st.markdown('<div class="vc-panel">', unsafe_allow_html=True)
-    st.markdown("<h3>Acceso</h3>", unsafe_allow_html=True)
-    st.markdown('<div class="vc-sub" style="margin-top:-2px;">Iniciá sesión para comenzar. Tu sesión se valida contra el backend.</div>', unsafe_allow_html=True)
-
+# ===================== SIDEBAR: LOGIN =====================
+with st.sidebar:
+    st.subheader("Acceso")
     api_key = st.session_state.auth["api_key"]
-    cuit_login = st.text_input("CUIT (sin guiones)", value=st.session_state.auth["cuit"] or LOGIN_CUIT_DEFAULT, key="login_cuit_main")
-    password = st.text_input("Contraseña", type="password", key="login_pass_main")
+
+    cuit_login = st.text_input("CUIT (sin guiones)", value=st.session_state.auth["cuit"] or LOGIN_CUIT_DEFAULT)
+    password = st.text_input("Contraseña", type="password")
 
     colA, colB = st.columns(2)
     with colA:
-        if st.button("Ingresar", use_container_width=True, key="btn_login_main"):
+        if st.button("Ingresar", use_container_width=True):
             try:
                 token = backend_login(BASE_URL, api_key, cuit_login, password)
                 st.session_state.auth = {
@@ -536,68 +188,6 @@ def render_login_screen():
                 st.error(str(e))
 
     with colB:
-        if st.button("Limpiar", use_container_width=True, key="btn_clear_main"):
-            st.session_state.pop("login_pass_main", None)
-            st.rerun()
-
-    st.markdown(
-        """
-        <div class="vc-sub" style="margin-top:10px;">
-          Consejo: si vas a procesar muchos archivos, usá ZIP y dejá que el sistema lo procese en tandas.
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Panel derecha: Cómo funciona
-    st.markdown('<div class="vc-panel">', unsafe_allow_html=True)
-    st.markdown("<h3>Cómo funciona</h3>", unsafe_allow_html=True)
-    st.markdown('<div class="vc-sub" style="margin-top:-2px;">Flujo estándar de validación, pensado para uso operativo.</div>', unsafe_allow_html=True)
-
-    st.markdown(
-        """
-        <div class="vc-steps">
-          <div class="vc-step"><b>1) Ingresá</b><span>Accedé con tu CUIT y contraseña.</span></div>
-          <div class="vc-step"><b>2) Subí PDFs/ZIP</b><span>Cargá facturas en PDF o un ZIP con PDFs.</span></div>
-          <div class="vc-step"><b>3) Vista previa</b><span>Detectamos CAE y vencimiento localmente desde el PDF.</span></div>
-          <div class="vc-step"><b>4) Validación AFIP</b><span>Confirmamos contra AFIP vía WSCDC (servidor).</span></div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)  # grid
-
-    st.markdown(
-        """
-        <div class="vc-sub" style="margin-top:14px;">
-          Al iniciar sesión, vas a ver el resumen del mes y la carga de archivos. 
-          La interfaz está optimizada para evitar demoras y mantener consistencia.
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.markdown('</div></div>', unsafe_allow_html=True)  # card + wrap
-
-# ===================== SIDEBAR (solo cuando está logueado) =====================
-def render_sidebar_logged():
-    with st.sidebar:
-        st.markdown("### Acceso")
-        st.markdown(f"**CUIT:** `{st.session_state.auth.get('cuit','')}`")
-
-        colA, colB = st.columns(2)
-        with colA:
-            st.caption("Sesión")
-            st.write("✅ Activa")
-        with colB:
-            st.caption("Backend")
-            st.write("🟢 OK" if BASE_URL else "🔴")
-
-        st.divider()
-
         if st.button("Salir", use_container_width=True):
             st.session_state.auth = {
                 "logged": False,
@@ -609,15 +199,22 @@ def render_sidebar_logged():
 
 # ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
-    # Mostramos login pro y cortamos.
-    render_login_screen()
+    st.info("Iniciá sesión para comenzar.")
+
+    st.subheader("Cómo funciona")
+    st.write("Seguí estos pasos para validar tus facturas:")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown("**1) Ingresá**\n\nAccedé con tu CUIT y contraseña.")
+    with c2:
+        st.markdown("**2) Subí PDFs/ZIP**\n\nCargá tus facturas en PDF (o un ZIP con PDFs).")
+    with c3:
+        st.markdown("**3) Vista previa**\n\nDetectamos CAE y vencimiento desde el PDF.")
+    with c4:
+        st.markdown("**4) Validación AFIP**\n\nConfirmamos contra AFIP vía WSCDC.")
+
+    st.caption("Consejo: si subís muchos archivos, la validación se procesa automáticamente en tandas para evitar demoras.")
     st.stop()
-
-# Sidebar pro cuando está logueado
-render_sidebar_logged()
-
-# ===================== HEADER =====================
-st.title("Verificador de CAE")
 
 # ===================== INFO GENERAL =====================
 st.info(
@@ -757,9 +354,8 @@ st.dataframe(df, use_container_width=True)
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
 st.subheader("Validación contra AFIP")
 st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
-st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDFs (ajustable).")
 
-overlay = st.empty()
+st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDFs (ajustable).")
 
 if st.button("Validar ahora", use_container_width=True):
     if not pdf_files:
@@ -770,23 +366,9 @@ if st.button("Validar ahora", use_container_width=True):
         all_rows = []
         batches = chunk_list(pdf_files, BATCH_SIZE)
 
-        # Overlay pro + progreso por tandas
-        show_loading_overlay(
-            overlay,
-            title="Consultando AFIP…",
-            subtitle="Procesando en tandas para evitar demoras. No cierres esta pestaña."
-        )
-
         batch_progress = st.progress(0)
         with st.spinner("Consultando AFIP..."):
             for idx, batch in enumerate(batches, start=1):
-                # update overlay subtitle con “tanda X / N”
-                show_loading_overlay(
-                    overlay,
-                    title="Consultando AFIP…",
-                    subtitle=f"Tanda {idx}/{len(batches)} en proceso…"
-                )
-
                 result = backend_verify(
                     base_url=BASE_URL,
                     api_key=st.session_state.auth["api_key"],
@@ -798,8 +380,6 @@ if st.button("Validar ahora", use_container_width=True):
                 all_rows.extend(backend_rows)
                 batch_progress.progress(idx / len(batches))
 
-        hide_loading_overlay(overlay)
-
         if all_rows:
             df = pd.DataFrame(all_rows)
             st.success("Validación completada.")
@@ -807,7 +387,6 @@ if st.button("Validar ahora", use_container_width=True):
         else:
             st.warning("No pudimos obtener resultados del servidor. Probá de nuevo en unos segundos.")
     except Exception as e:
-        hide_loading_overlay(overlay)
         st.error(str(e))
 
 # ===================== EXPORTS (CSV + XLSX) =====================
