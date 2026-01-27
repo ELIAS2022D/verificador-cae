@@ -10,6 +10,7 @@ import requests
 
 # ===================== CONFIG =====================
 st.set_page_config(page_title="Verificador CAE", layout="wide")
+st.title("Verificador de CAE")
 
 BASE_URL = st.secrets.get("BASE_URL", "")
 DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
@@ -34,20 +35,6 @@ MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
 if not BASE_URL:
     st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
     st.stop()
-
-# ===================== HEADER UI (BOTÓN PLANES) =====================
-# Botón arriba a la derecha para ir a la página de planes (multipage)
-col_left, col_right = st.columns([7, 2])
-with col_left:
-    st.title("Verificador de CAE")
-with col_right:
-    try:
-        st.page_link("pages/1_Planes.py", label="💳 Ver planes")
-    except Exception:
-        # fallback por compatibilidad
-        st.markdown("")
-
-st.divider()
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
@@ -212,6 +199,15 @@ with st.sidebar:
 
 # ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
+    # ---- Top bar: botón planes arriba a la derecha ----
+    top_left, top_right = st.columns([6, 1])
+    with top_right:
+        if st.button("💳 Ver planes", use_container_width=True):
+            try:
+                st.switch_page("pages/1_Planes.py")
+            except Exception:
+                st.warning("No se encontró la página de Planes. Creá 'pages/1_Planes.py' en tu repo.")
+
     st.info("Iniciá sesión para comenzar.")
 
     st.subheader("Cómo funciona")
