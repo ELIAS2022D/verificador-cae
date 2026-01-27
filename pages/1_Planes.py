@@ -4,7 +4,7 @@ import streamlit as st
 st.set_page_config(
     page_title="Tarifas | lexaCAE",
     layout="wide",
-    initial_sidebar_state="expanded",  # ✅ arranca siempre visible
+    initial_sidebar_state="expanded",
 )
 
 # =========================================================
@@ -41,7 +41,6 @@ MP_LINKS = {
     "pack_300_a": (cfg("MP_PACK_300_A_URL", "") or "").strip(),
     "pack_500_a": (cfg("MP_PACK_500_A_URL", "") or "").strip(),
 }
-
 MP_EMBED_HTML = (cfg("MP_EMBED_HTML", "") or "").strip()
 
 LOGIN_URL = (cfg("LOGIN_URL", "/") or "/").strip()
@@ -50,39 +49,80 @@ APP_URL = (cfg("APP_URL", "") or "").strip() or LOGIN_URL
 HERO_IMAGE_PATH = (cfg("HERO_IMAGE_PATH", "assets/mujerAdmin.jpeg") or "assets/mujerAdmin.jpeg").strip()
 
 # =========================================================
-# CSS (moderno + sidebar) + FIX para "reabrir sidebar"
+# CSS (moderno + sidebar fija)
 # =========================================================
 st.markdown(
     """
 <style>
-/* ====== Base ====== */
-.block-container{
-  padding-top: 14px !important;
-  padding-bottom: 26px !important;
-  max-width: 1200px !important;
+/* ====== ANCHO sidebar fijo ====== */
+:root{
+  --sidebar-w: 22rem; /* <-- ajustá acá (ej 20rem / 24rem) */
+  --blue:#0b4fb3;
+  --blue-dark:#083a86;
+  --card:#ffffff;
+  --text:#0f172a;
+  --muted:#475569;
+  --border: rgba(15, 23, 42, 0.12);
 }
+
+/* ====== Base ====== */
 header[data-testid="stHeader"]{ background: transparent; }
 div[data-testid="stToolbar"]{ display:none; }
 
-/* ✅ Importante: NO ocultar el colapsador del sidebar (<<) */
+/* ✅ Mostrar botón de colapsar (<<) */
 button[data-testid="collapsedControl"]{
   display: block !important;
   opacity: 1 !important;
   visibility: visible !important;
 }
 
-/* ====== Sidebar moderno ====== */
+/* ====== Sidebar fija ====== */
 section[data-testid="stSidebar"]{
+  position: fixed !important;
+  top: 0;
+  left: 0;
+  height: 100vh !important;
+  width: var(--sidebar-w) !important;
+  min-width: var(--sidebar-w) !important;
+  max-width: var(--sidebar-w) !important;
   background: #f6f8fc;
   border-right: 1px solid rgba(15,23,42,.08);
+  overflow-y: auto !important;
+  z-index: 999 !important;
 }
 section[data-testid="stSidebar"] .stSidebarContent{
   padding-top: 18px;
 }
+
+/* ====== Main: corrimiento para no tapar contenido ====== */
+div[data-testid="stAppViewContainer"]{
+  margin-left: var(--sidebar-w) !important;
+}
+.block-container{
+  padding-top: 14px !important;
+  padding-bottom: 26px !important;
+  max-width: 1200px !important;
+}
+
+/* En mobile: volvemos a comportamiento normal (sidebar overlay) */
+@media (max-width: 900px){
+  section[data-testid="stSidebar"]{
+    position: relative !important;
+    width: auto !important;
+    min-width: unset !important;
+    max-width: unset !important;
+    height: auto !important;
+  }
+  div[data-testid="stAppViewContainer"]{
+    margin-left: 0 !important;
+  }
+}
+
+/* ====== Sidebar moderno ====== */
 .sidebar-brand{
   font-weight: 900;
   font-size: 18px;
-  color: #0b4fb3;
+  color: var(--blue);
   letter-spacing: .2px;
   margin-bottom: 10px;
 }
@@ -94,9 +134,7 @@ section[data-testid="stSidebar"] .stSidebarContent{
 }
 
 /* Pills del radio (App / Planes) */
-div[role="radiogroup"] > label{
-  width: 100%;
-}
+div[role="radiogroup"] > label{ width: 100%; }
 div[role="radiogroup"] label{
   padding: 10px 10px !important;
   border-radius: 12px !important;
@@ -110,7 +148,7 @@ div[role="radiogroup"] label:hover{
   box-shadow: 0 8px 18px rgba(2,6,23,.06);
 }
 
-/* Sección Login */
+/* Card login */
 .sidebar-card{
   background: white;
   border: 1px solid rgba(15,23,42,.10);
@@ -121,7 +159,7 @@ div[role="radiogroup"] label:hover{
 .sidebar-title{
   font-size: 16px;
   font-weight: 900;
-  color: #0f172a;
+  color: var(--text);
   margin: 0 0 8px 0;
 }
 .sidebar-help{
@@ -130,16 +168,7 @@ div[role="radiogroup"] label:hover{
   margin: 0 0 12px 0;
 }
 
-/* ====== Main (Hero + Cards) ====== */
-:root{
-  --blue:#0b4fb3;
-  --blue-dark:#083a86;
-  --card:#ffffff;
-  --text:#0f172a;
-  --muted:#475569;
-  --border: rgba(15, 23, 42, 0.12);
-}
-
+/* ====== Hero ====== */
 .hero-wrap{
   background: linear-gradient(180deg, rgba(11,79,179,.06), rgba(11,79,179,0));
   border: 1px solid rgba(15,23,42,.08);
@@ -181,8 +210,6 @@ div[role="radiogroup"] label:hover{
   color: var(--text);
   font-weight: 800;
 }
-
-/* Imagen del hero */
 .hero-img-wrap img{
   border-radius: 16px !important;
   object-fit: cover;
@@ -193,7 +220,7 @@ div[role="radiogroup"] label:hover{
   display: block;
 }
 
-/* planes */
+/* ====== Planes ====== */
 .section-title{
   text-align:center;
   font-size: 24px;
@@ -201,8 +228,6 @@ div[role="radiogroup"] label:hover{
   color: var(--text);
   margin: 18px 0 10px 0;
 }
-
-/* cards */
 .plan-card{
   background: var(--card);
   border: 1px solid var(--border);
@@ -239,7 +264,6 @@ div[role="radiogroup"] label:hover{
   color: #111827;
   font-weight: 900;
 }
-
 .popular-ribbon{
   position:absolute;
   top: 0;
@@ -259,13 +283,11 @@ div[role="radiogroup"] label:hover{
 .popular{
   border: 2px solid rgba(11,79,179,.30);
 }
-
 .checkout{
   margin-top: 16px;
   padding: 0 2px;
 }
 
-/* responsive */
 @media (max-width: 1020px){
   .hero-title{ font-size: 26px; }
   .hero-img-wrap img{ max-width: 100% !important; }
@@ -368,7 +390,6 @@ ct1, ct2, ct3 = st.columns([3, 2.2, 3])
 with ct2:
     anual = st.toggle("Planes anuales (Ahorrá 25%)", value=False)
 
-# Planes (manteniendo tu pricing + lógica MP)
 plans = [
     {"id": "pack_50",  "title": "Starter",    "monthly": 12041, "annual": 9031,  "qty": "50 facturas",   "featured": False},
     {"id": "pack_150", "title": "Pro",        "monthly": 24423, "annual": 18317, "qty": "150 facturas",  "featured": False},
@@ -398,7 +419,6 @@ for idx, p in enumerate(plans):
             if st.button("Obtené una cotización", use_container_width=True, key="quote_enterprise"):
                 st.session_state["mp_plan"] = p["id"]
                 st.session_state["mp_is_annual"] = bool(anual)
-
         else:
             price = p["annual"] if anual else p["monthly"]
             popular = "popular" if p["featured"] else ""
@@ -421,9 +441,7 @@ for idx, p in enumerate(plans):
                 st.session_state["mp_plan"] = p["id"]
                 st.session_state["mp_is_annual"] = bool(anual)
 
-# =========================================================
-# Checkout Mercado Pago
-# =========================================================
+# Checkout
 st.markdown("<div class='checkout'>", unsafe_allow_html=True)
 
 if st.session_state.get("mp_plan"):
