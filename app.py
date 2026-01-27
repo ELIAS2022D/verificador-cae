@@ -19,6 +19,7 @@ LOGIN_CUIT_DEFAULT = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
 MAX_FILES_RAW = st.secrets.get("MAX_FILES", None)
 BATCH_SIZE = int(st.secrets.get("BATCH_SIZE", 50))
 
+
 def _parse_int_or_none(x):
     try:
         if x is None:
@@ -29,56 +30,78 @@ def _parse_int_or_none(x):
     except Exception:
         return None
 
+
 MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
 
 if not BASE_URL:
     st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
     st.stop()
 
-# ===================== UI (WHITE + FIREBASE ACCENTS) =====================
-def inject_ui_white_firebase():
+# ===================== UI (WHITE + SOFT FIREBASE ACCENTS + READABILITY FIXES) =====================
+def inject_ui_white_firebase_soft():
     css = """
     <style>
-      /* ---- hide streamlit chrome ---- */
+      /* ---------------- hide streamlit chrome ---------------- */
       #MainMenu, header, footer { visibility: hidden; height: 0; }
       [data-testid="stToolbar"] { display: none; }
       [data-testid="stStatusWidget"] { display: none; }
 
-      /* ---- global background (WHITE) ---- */
+      /* ---------------- base background (white + very soft blobs) ---------------- */
       .stApp {
         background:
-          radial-gradient(1200px circle at 18% 12%, rgba(255, 152, 0, .10), transparent 55%),
-          radial-gradient(900px circle at 75% 18%, rgba(233, 30, 99, .10), transparent 55%),
-          radial-gradient(1000px circle at 62% 86%, rgba(103, 58, 183, .10), transparent 60%),
+          radial-gradient(1100px circle at 18% 12%, rgba(255, 152, 0, .08), transparent 58%),
+          radial-gradient(950px circle at 76% 18%, rgba(233, 30, 99, .07), transparent 58%),
+          radial-gradient(1100px circle at 64% 86%, rgba(103, 58, 183, .07), transparent 60%),
           #f7f8fb !important;
         color: #0f172a !important;
       }
 
-      /* container spacing */
+      /* better spacing */
       .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
 
-      /* ---- sidebar (WHITE) ---- */
-      [data-testid="stSidebar"]{
-        background: rgba(255,255,255,.70) !important;
-        border-right: 1px solid rgba(15,23,42,.08);
-        backdrop-filter: blur(10px);
+      /* ---------------- typography defaults (READABILITY) ---------------- */
+      html, body, [class*="st-"], p, span, label, div {
+        color: #0f172a;
       }
-      [data-testid="stSidebar"] * {
+      /* secondary text */
+      .stCaption, [data-testid="stCaptionContainer"] * {
+        color: rgba(15, 23, 42, .70) !important;
+      }
+      /* markdown inside info/warn etc handled below */
+
+      /* ---------------- fix metrics readability ---------------- */
+      [data-testid="stMetricLabel"] {
+        color: rgba(15, 23, 42, .68) !important;
+        font-weight: 650 !important;
+      }
+      [data-testid="stMetricValue"] {
         color: #0f172a !important;
+        font-weight: 850 !important;
+      }
+      [data-testid="stMetricDelta"] {
+        color: rgba(15, 23, 42, .65) !important;
       }
 
-      /* ---- inputs ---- */
+      /* ---------------- radio / checkbox labels ---------------- */
+      .stRadio label, .stRadio p, .stCheckbox label, .stCheckbox p {
+        color: rgba(15, 23, 42, .78) !important;
+      }
+      .stRadio div[role="radiogroup"] label span {
+        color: rgba(15, 23, 42, .78) !important;
+      }
+
+      /* ---------------- inputs ---------------- */
       .stTextInput input, .stPassword input{
-        background: rgba(255,255,255,.85) !important;
-        border: 1px solid rgba(15,23,42,.10) !important;
+        background: rgba(255,255,255,.92) !important;
+        border: 1px solid rgba(15,23,42,.12) !important;
         color: #0f172a !important;
         border-radius: 12px !important;
         padding: 12px 12px !important;
         transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
       }
       .stTextInput input:focus, .stPassword input:focus{
-        border-color: rgba(255,152,0,.55) !important;
-        box-shadow: 0 0 0 4px rgba(255,152,0,.14) !important;
+        border-color: rgba(255,152,0,.45) !important;
+        box-shadow: 0 0 0 4px rgba(255,152,0,.12) !important;
         transform: translateY(-1px);
       }
       label, .stTextInput label, .stPassword label{
@@ -86,16 +109,26 @@ def inject_ui_white_firebase():
         font-size: 12px !important;
       }
 
-      /* ---- primary buttons (Firebase-ish gradient) ---- */
+      /* ---------------- file uploader (make text readable on light theme) ---------------- */
+      [data-testid="stFileUploaderDropzone"]{
+        background: rgba(255,255,255,.78) !important;
+        border: 1px dashed rgba(15,23,42,.20) !important;
+        border-radius: 14px !important;
+      }
+      [data-testid="stFileUploaderDropzone"] *{
+        color: rgba(15,23,42,.78) !important;
+      }
+
+      /* ---------------- primary buttons (SOFTER firebase gradient) ---------------- */
       .stButton button, .stDownloadButton button{
-        border: 1px solid rgba(15,23,42,.10) !important;
+        border: 1px solid rgba(15,23,42,.12) !important;
         background: linear-gradient(90deg,
-          rgba(255,152,0,.96),
-          rgba(233,30,99,.92),
-          rgba(103,58,183,.90)
+          rgba(255, 167, 38, .92),   /* softer orange */
+          rgba(236, 64, 122, .88),   /* softer pink */
+          rgba(126, 87, 194, .86)    /* softer purple */
         ) !important;
         color: #0b0b0f !important;
-        font-weight: 820 !important;
+        font-weight: 850 !important;
         border-radius: 12px !important;
         padding: 12px 14px !important;
         transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
@@ -109,9 +142,30 @@ def inject_ui_white_firebase():
         transform: translateY(0px) scale(.995);
       }
 
-      /* ---- nice cards via markdown blocks ---- */
+      /* ---------------- alerts: info/warn/error look better on white ---------------- */
+      [data-testid="stAlert"]{
+        border-radius: 14px !important;
+        border: 1px solid rgba(15,23,42,.10) !important;
+        background: rgba(255,255,255,.78) !important;
+        box-shadow: 0 10px 26px rgba(15,23,42,.08) !important;
+      }
+      [data-testid="stAlert"] *{
+        color: rgba(15,23,42,.78) !important;
+      }
+
+      /* ---------------- sidebar (WHITE) ---------------- */
+      [data-testid="stSidebar"]{
+        background: rgba(255,255,255,.80) !important;
+        border-right: 1px solid rgba(15,23,42,.08);
+        backdrop-filter: blur(10px);
+      }
+      [data-testid="stSidebar"] *{
+        color: #0f172a !important;
+      }
+
+      /* ---------------- “cards” for login marketing blocks ---------------- */
       .vc-card{
-        background: rgba(255,255,255,.72);
+        background: rgba(255,255,255,.78);
         border: 1px solid rgba(15,23,42,.10);
         box-shadow: 0 24px 80px rgba(15,23,42,.10);
         border-radius: 18px;
@@ -127,9 +181,9 @@ def inject_ui_white_firebase():
         inset:-2px;
         border-radius: 20px;
         background: linear-gradient(90deg,
-          rgba(255,152,0,.20),
-          rgba(233,30,99,.18),
-          rgba(103,58,183,.18)
+          rgba(255,167,38,.18),
+          rgba(236,64,122,.16),
+          rgba(126,87,194,.16)
         );
         filter: blur(22px);
         opacity: .55;
@@ -137,21 +191,16 @@ def inject_ui_white_firebase():
       }
       .vc-card > * { position: relative; z-index: 1; }
 
-      .vc-brand{
-        display:flex;
-        align-items:center;
-        gap: 12px;
-        margin-bottom: 10px;
-      }
+      .vc-brand{ display:flex; align-items:center; gap:12px; margin-bottom: 10px; }
       .vc-logo{
         width: 38px; height: 38px;
         border-radius: 12px;
         background: linear-gradient(135deg,
-          rgba(255,152,0,.98),
-          rgba(233,30,99,.95),
-          rgba(103,58,183,.92)
+          rgba(255,167,38,.95),
+          rgba(236,64,122,.92),
+          rgba(126,87,194,.90)
         );
-        box-shadow: 0 14px 34px rgba(15,23,42,.18);
+        box-shadow: 0 14px 34px rgba(15,23,42,.14);
       }
       .vc-title{
         font-size: 30px;
@@ -162,68 +211,53 @@ def inject_ui_white_firebase():
       }
       .vc-sub{
         margin: 6px 0 0 0;
-        color: rgba(15,23,42,.70);
+        color: rgba(15,23,42,.72);
         font-size: 13.5px;
         line-height: 1.45;
       }
 
-      .vc-chiprow{
-        display:flex;
-        gap: 8px;
-        flex-wrap: wrap;
-        margin-top: 14px;
-        margin-bottom: 16px;
-      }
+      .vc-chiprow{ display:flex; gap:8px; flex-wrap:wrap; margin-top: 14px; margin-bottom: 16px; }
       .vc-chip{
-        display:inline-flex;
-        gap:8px;
-        align-items:center;
+        display:inline-flex; gap:8px; align-items:center;
         padding: 6px 10px;
         border-radius: 999px;
         border: 1px solid rgba(15,23,42,.10);
-        background: rgba(255,255,255,.55);
+        background: rgba(255,255,255,.60);
         font-size: 12px;
         color: rgba(15,23,42,.78);
       }
 
       .vc-panel{
         border: 1px solid rgba(15,23,42,.10);
-        background: rgba(255,255,255,.58);
+        background: rgba(255,255,255,.60);
         border-radius: 16px;
         padding: 16px 14px;
       }
       .vc-panel h3{
         margin: 0 0 6px 0;
         font-size: 16px;
-        font-weight: 860;
+        font-weight: 900;
         color: #0f172a;
       }
       .vc-panel p{
         margin: 0 0 10px 0;
-        color: rgba(15,23,42,.68);
+        color: rgba(15,23,42,.70);
         font-size: 13px;
         line-height: 1.4;
       }
 
-      .vc-steps{
-        display:grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-        margin-top: 8px;
-      }
-      @media (max-width: 920px){
-        .vc-steps{ grid-template-columns: 1fr; }
-      }
+      .vc-steps{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top: 8px; }
+      @media (max-width: 920px){ .vc-steps{ grid-template-columns: 1fr; } }
       .vc-step{
         border: 1px solid rgba(15,23,42,.10);
-        background: rgba(255,255,255,.50);
+        background: rgba(255,255,255,.55);
         border-radius: 14px;
         padding: 12px 12px;
       }
       .vc-step b{ display:block; font-size: 13px; margin-bottom: 4px; color:#0f172a; }
-      .vc-step span{ color: rgba(15,23,42,.66); font-size: 12.5px; line-height: 1.35; }
+      .vc-step span{ color: rgba(15,23,42,.68); font-size: 12.5px; line-height: 1.35; }
 
-      /* ===== Overlay loading (WHITE) ===== */
+      /* ---------------- overlay loading (WHITE) ---------------- */
       .vc-overlay {
         position: fixed;
         inset: 0;
@@ -231,7 +265,7 @@ def inject_ui_white_firebase():
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(247,248,251,.60);
+        background: rgba(247,248,251,.62);
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         animation: vc_fade .20s ease-out both;
@@ -240,7 +274,7 @@ def inject_ui_white_firebase():
 
       .vc-overlay-card{
         width: min(520px, 92vw);
-        background: rgba(255,255,255,.78);
+        background: rgba(255,255,255,.82);
         border: 1px solid rgba(15,23,42,.10);
         box-shadow: 0 24px 90px rgba(15,23,42,.14);
         border-radius: 18px;
@@ -254,9 +288,9 @@ def inject_ui_white_firebase():
         inset:-2px;
         border-radius: 20px;
         background: linear-gradient(90deg,
-          rgba(255,152,0,.18),
-          rgba(233,30,99,.16),
-          rgba(103,58,183,.16)
+          rgba(255,167,38,.18),
+          rgba(236,64,122,.16),
+          rgba(126,87,194,.16)
         );
         filter: blur(24px);
         opacity: .60;
@@ -267,7 +301,7 @@ def inject_ui_white_firebase():
         width: 54px; height: 54px;
         border-radius: 999px;
         border: 4px solid rgba(15,23,42,.12);
-        border-top-color: rgba(255,152,0,.95);
+        border-top-color: rgba(255,167,38,.95);
         animation: vc_spin 1s linear infinite;
         margin: 8px auto 10px auto;
       }
@@ -276,13 +310,13 @@ def inject_ui_white_firebase():
       .vc-overlay-title{
         text-align:center;
         font-size: 16px;
-        font-weight: 860;
+        font-weight: 900;
         margin: 0 0 6px 0;
         color: #0f172a;
       }
       .vc-overlay-sub{
         text-align:center;
-        color: rgba(15,23,42,.66);
+        color: rgba(15,23,42,.70);
         font-size: 12.5px;
         margin: 0;
       }
@@ -298,9 +332,9 @@ def inject_ui_white_firebase():
         width: 45%;
         border-radius: 999px;
         background: linear-gradient(90deg,
-          rgba(255,152,0,.95),
-          rgba(233,30,99,.92),
-          rgba(103,58,183,.90)
+          rgba(255,167,38,.95),
+          rgba(236,64,122,.90),
+          rgba(126,87,194,.88)
         );
         animation: vc_load 1.0s ease-in-out infinite alternate;
       }
@@ -309,7 +343,7 @@ def inject_ui_white_firebase():
         to   { transform: translateX(40%);  width: 60%; }
       }
 
-      /* ===== Login-only centering using :has marker ===== */
+      /* ---------------- login centering (only on login screen) ---------------- */
       .stApp:has(#login-marker) .block-container{
         padding-top: 0 !important;
         padding-bottom: 0 !important;
@@ -321,16 +355,15 @@ def inject_ui_white_firebase():
       div[data-testid="stAppViewContainer"] > section{
         padding-top: 0 !important;
       }
-
-      /* The card is the first block right after the marker */
       #login-marker + div{
-        width: min(980px, 96vw) !important;
+        width: min(1100px, 96vw) !important;
       }
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
 
-inject_ui_white_firebase()
+
+inject_ui_white_firebase_soft()
 
 # ===================== OVERLAY HELPERS =====================
 def show_loading_overlay(placeholder, title: str, subtitle: str = ""):
@@ -345,6 +378,7 @@ def show_loading_overlay(placeholder, title: str, subtitle: str = ""):
     </div>
     """
     placeholder.markdown(html, unsafe_allow_html=True)
+
 
 def hide_loading_overlay(placeholder):
     placeholder.empty()
@@ -368,6 +402,7 @@ VTO_PATTERNS = [
     ),
 ]
 
+
 def find_first(patterns, text: str):
     for pat in patterns:
         m = pat.search(text)
@@ -381,6 +416,7 @@ def find_first(patterns, text: str):
             return m2.group(1)
     return None
 
+
 def parse_date(date_str: str):
     if not date_str:
         return None
@@ -392,8 +428,10 @@ def parse_date(date_str: str):
             pass
     return None
 
+
 def basic_format_ok(cae: str) -> bool:
     return bool(cae and re.fullmatch(r"\d{14}", cae))
+
 
 def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -411,6 +449,7 @@ def ensure_auth_state():
             "access_token": "",
             "cuit": ""
         }
+
 
 ensure_auth_state()
 
@@ -430,6 +469,7 @@ def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
         raise RuntimeError("Login OK pero el backend no devolvió access_token.")
     return token
 
+
 def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: list, timeout_s: int = 180):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
@@ -447,6 +487,7 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
         raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
     return r.json()
 
+
 def backend_usage_current(base_url: str, api_key: str, access_token: str):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
@@ -455,6 +496,7 @@ def backend_usage_current(base_url: str, api_key: str, access_token: str):
     if r.status_code != 200:
         raise RuntimeError(f"Usage falló ({r.status_code}): {r.text}")
     return r.json()
+
 
 def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
     """
@@ -471,17 +513,17 @@ def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
         raise RuntimeError(f"Enviar email falló ({r.status_code}): {r.text}")
     return r.json()
 
+
 def chunk_list(items, size: int):
     if size <= 0:
         return [items]
     return [items[i:i+size] for i in range(0, len(items), size)]
 
-# ===================== LOGIN SCREEN (NO BAR / NO EMPTY SPACE) =====================
+# ===================== LOGIN SCREEN =====================
 def render_login_screen():
-    # Marker for CSS centering with :has()
+    # marker for login-only centering css
     st.markdown('<div id="login-marker"></div>', unsafe_allow_html=True)
 
-    # Card layout using native Streamlit (no HTML wrapper around widgets)
     left, right = st.columns([1.05, 0.95], gap="large")
 
     with left:
@@ -496,14 +538,14 @@ def render_login_screen():
                 </div>
               </div>
               <div class="vc-chiprow">
-                <div class="vc-chip">🔒 Acceso con token</div>
+                <div class="vc-chip">🔒 Acceso seguro</div>
                 <div class="vc-chip">⚡ Procesamiento por tandas</div>
                 <div class="vc-chip">✅ Validación AFIP</div>
                 <div class="vc-chip">📄 PDF / ZIP</div>
               </div>
               <div class="vc-panel">
                 <h3>Acceso</h3>
-                <p>Iniciá sesión para comenzar. Tu sesión se valida contra el backend.</p>
+                <p>Iniciá sesión para comenzar. La sesión se valida contra el backend.</p>
               </div>
             </div>
             """,
@@ -511,7 +553,6 @@ def render_login_screen():
         )
 
         api_key = st.session_state.auth["api_key"]
-
         cuit_login = st.text_input(
             "CUIT (sin guiones)",
             value=st.session_state.auth["cuit"] or LOGIN_CUIT_DEFAULT,
@@ -533,7 +574,7 @@ def render_login_screen():
             except Exception as e:
                 st.error(str(e))
 
-        st.caption("Consejo: si vas a procesar muchos archivos, usá ZIP y dejá que el sistema lo procese en tandas.")
+        st.caption("Tip: para muchos comprobantes, subí un ZIP y dejá que el sistema procese en tandas.")
 
     with right:
         st.markdown(
@@ -545,12 +586,12 @@ def render_login_screen():
               </div>
               <div class="vc-steps" style="margin-top:12px;">
                 <div class="vc-step"><b>1) Ingresá</b><span>Accedé con tu CUIT y contraseña.</span></div>
-                <div class="vc-step"><b>2) Subí PDFs/ZIP</b><span>Cargá facturas en PDF o un ZIP con PDFs.</span></div>
-                <div class="vc-step"><b>3) Vista previa</b><span>Detectamos CAE y vencimiento localmente desde el PDF.</span></div>
-                <div class="vc-step"><b>4) Validación AFIP</b><span>Confirmamos contra AFIP vía WSCDC (servidor).</span></div>
+                <div class="vc-step"><b>2) Subí PDFs/ZIP</b><span>Cargá PDFs o un ZIP con PDFs.</span></div>
+                <div class="vc-step"><b>3) Vista previa</b><span>Detectamos CAE y vencimiento desde el PDF.</span></div>
+                <div class="vc-step"><b>4) Validación AFIP</b><span>Confirmamos contra AFIP vía WSCDC.</span></div>
               </div>
               <div class="vc-sub" style="margin-top:14px;">
-                Al iniciar sesión, vas a ver el resumen del mes, carga de archivos y validación.
+                Al iniciar sesión vas a ver el resumen del mes, carga y validación.
               </div>
             </div>
             """,
