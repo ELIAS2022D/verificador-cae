@@ -1,7 +1,11 @@
 import os
 import streamlit as st
 
-st.set_page_config(page_title="Tarifas | lexaCAE", layout="wide")
+st.set_page_config(
+    page_title="Tarifas | lexaCAE",
+    layout="wide",
+    initial_sidebar_state="expanded",  # ✅ arranca siempre visible
+)
 
 # =========================================================
 # Config resolver: Render ENV first, then Streamlit secrets
@@ -40,17 +44,13 @@ MP_LINKS = {
 
 MP_EMBED_HTML = (cfg("MP_EMBED_HTML", "") or "").strip()
 
-# Ruta del login/app (si usás multipage puede ser "/")
 LOGIN_URL = (cfg("LOGIN_URL", "/") or "/").strip()
-
-# Si querés que "app" vaya a otro lado distinto del login:
 APP_URL = (cfg("APP_URL", "") or "").strip() or LOGIN_URL
 
-# Imagen local dentro del repo
 HERO_IMAGE_PATH = (cfg("HERO_IMAGE_PATH", "assets/mujerAdmin.jpeg") or "assets/mujerAdmin.jpeg").strip()
 
 # =========================================================
-# CSS (moderno + sidebar)
+# CSS (moderno + sidebar) + FIX para "reabrir sidebar"
 # =========================================================
 st.markdown(
     """
@@ -63,6 +63,13 @@ st.markdown(
 }
 header[data-testid="stHeader"]{ background: transparent; }
 div[data-testid="stToolbar"]{ display:none; }
+
+/* ✅ Importante: NO ocultar el colapsador del sidebar (<<) */
+button[data-testid="collapsedControl"]{
+  display: block !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+}
 
 /* ====== Sidebar moderno ====== */
 section[data-testid="stSidebar"]{
@@ -102,9 +109,6 @@ div[role="radiogroup"] label:hover{
   border-color: rgba(11,79,179,.25) !important;
   box-shadow: 0 8px 18px rgba(2,6,23,.06);
 }
-div[role="radiogroup"] label[data-baseweb="radio"]{
-  gap: 10px;
-}
 
 /* Sección Login */
 .sidebar-card{
@@ -130,7 +134,6 @@ div[role="radiogroup"] label[data-baseweb="radio"]{
 :root{
   --blue:#0b4fb3;
   --blue-dark:#083a86;
-  --bg-soft:#eaf4ff;
   --card:#ffffff;
   --text:#0f172a;
   --muted:#475569;
@@ -178,25 +181,14 @@ div[role="radiogroup"] label[data-baseweb="radio"]{
   color: var(--text);
   font-weight: 800;
 }
-.cta{
-  display:inline-block;
-  padding: 10px 14px;
-  border-radius: 999px;
-  border: 1.5px solid rgba(11,79,179,.35);
-  background: #fff;
-  color: var(--blue-dark);
-  font-weight: 950;
-  text-decoration:none;
-  margin-top: 10px;
-}
-.cta:hover{ background: rgba(11,79,179,.06); }
 
+/* Imagen del hero */
 .hero-img-wrap img{
   border-radius: 16px !important;
   object-fit: cover;
   box-shadow: 0 18px 45px rgba(2, 6, 23, 0.10);
   border: 1px solid rgba(2, 6, 23, 0.08);
-  max-width: 280px !important; /* más chica */
+  max-width: 280px !important;
   margin-left: auto;
   display: block;
 }
@@ -290,7 +282,6 @@ with st.sidebar:
     st.markdown("<div class='sidebar-brand'>lexaCAE</div>", unsafe_allow_html=True)
     st.markdown("<div class='sidebar-sub'>Verificación de CAE (AFIP) · WSCDC</div>", unsafe_allow_html=True)
 
-    # Navegación
     if "nav" not in st.session_state:
         st.session_state["nav"] = "Planes"
 
@@ -303,27 +294,22 @@ with st.sidebar:
     )
     st.session_state["nav"] = nav
 
-    # Acción navegación
     if nav == "app":
-        # te manda al login/app real
         soft_redirect(APP_URL)
 
     st.markdown("<hr style='border:none;height:1px;background:rgba(15,23,42,.10);margin:14px 0;'>", unsafe_allow_html=True)
 
-    # Login Card (visual)
     st.markdown("<div class='sidebar-card'>", unsafe_allow_html=True)
     st.markdown("<div class='sidebar-title'>Acceso</div>", unsafe_allow_html=True)
     st.markdown("<div class='sidebar-help'>Ingresá tus credenciales para usar la app.</div>", unsafe_allow_html=True)
 
     cuit = st.text_input("CUIT (sin guiones)", value=st.session_state.get("cuit", ""), key="sidebar_cuit")
-    pwd = st.text_input("Contraseña", type="password", value="", key="sidebar_pwd")
+    _pwd = st.text_input("Contraseña", type="password", value="", key="sidebar_pwd")
 
     b1, b2 = st.columns(2)
     with b1:
         if st.button("Ingresar", use_container_width=True):
-            # Guardamos en session por si lo querés usar en tu app real
             st.session_state["cuit"] = cuit.strip()
-            # Si querés redirigir al login real al tocar ingresar:
             soft_redirect(LOGIN_URL)
 
     with b2:
@@ -338,7 +324,6 @@ with st.sidebar:
 # =========================================================
 # MAIN: HERO + PLANES + CHECKOUT
 # =========================================================
-# HERO
 st.markdown("<div class='hero-wrap'>", unsafe_allow_html=True)
 
 hero_l, hero_r = st.columns([1.45, 0.55], gap="large")
@@ -348,7 +333,6 @@ with hero_l:
         """
         <div class="hero-title">Verificación de CAE de Facturas AFIP en segundos.</div>
         <div class="hero-sub">Servicio de validación de CAE para facturas electrónicas</div>
-        <div class="set_hack></div>
         <div class="hero-p">
           Nuestro sistema permite verificar CAE de facturas AFIP, confirmando que el comprobante fue autorizado correctamente.
           Ideal para empresas que necesitan validar facturas recibidas, evitar comprobantes apócrifos y reducir riesgos impositivos.
@@ -364,8 +348,6 @@ with hero_l:
           </ol>
           <div class="hero-note">Proceso rápido, automático y online.</div>
         </div>
-
-        <a class="cta" href="#planes">Ver planes</a>
         """,
         unsafe_allow_html=True,
     )
@@ -377,7 +359,7 @@ with hero_r:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# ANCHOR
+# Anchor
 st.markdown('<div id="planes"></div>', unsafe_allow_html=True)
 
 # Planes header + toggle
@@ -390,7 +372,7 @@ with ct2:
 plans = [
     {"id": "pack_50",  "title": "Starter",    "monthly": 12041, "annual": 9031,  "qty": "50 facturas",   "featured": False},
     {"id": "pack_150", "title": "Pro",        "monthly": 24423, "annual": 18317, "qty": "150 facturas",  "featured": False},
-    {"id": "pack_300", "title": "Advance",    "monthly": 32987, "annual": 24740, "qty": "300 facturas",  "featured": True},   # Más popular
+    {"id": "pack_300", "title": "Advance",    "monthly": 32987, "annual": 24740, "qty": "300 facturas",  "featured": True},
     {"id": "pack_500", "title": "Enterprise", "monthly": 40614, "annual": 30460, "qty": "500+ facturas", "featured": False, "enterprise": True},
 ]
 
@@ -455,7 +437,6 @@ if st.session_state.get("mp_plan"):
     link_key = f"{plan_id}_{suffix}"
     mp_url = (MP_LINKS.get(link_key) or "").strip()
 
-    # -------- Opción A: Link directo (recomendada) --------
     if mp_url:
         st.markdown(
             f"""
@@ -470,7 +451,6 @@ if st.session_state.get("mp_plan"):
         )
         st.caption("Si no se abre, habilitá pop-ups o abrilo desde otra pestaña.")
     else:
-        # -------- Opción B: Embed HTML/JS (si lo tenés) --------
         if MP_EMBED_HTML:
             st.info("Cargando checkout embebido…")
             st.components.v1.html(MP_EMBED_HTML, height=650, scrolling=True)
