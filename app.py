@@ -24,7 +24,7 @@ with col1:
         # si no existe el archivo, no frenamos la app
         pass
 with col2:
-    st.markdown("## LexaCAE")
+    st.markdown("LexaCAE")
     st.caption("Verificación oficial de CAE contra AFIP (WSCDC)")
 
 st.divider()
