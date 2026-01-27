@@ -1,7 +1,20 @@
+import os
 import streamlit as st
 from urllib.parse import quote
 
 st.set_page_config(page_title="Planes | Verificador CAE", layout="wide")
+
+# =========================================================
+# Config resolver: Render ENV first, then Streamlit secrets (if exists)
+# =========================================================
+def cfg(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    if v is not None and str(v).strip() != "":
+        return v
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 # =========================================================
 # Helpers
@@ -19,21 +32,21 @@ def go(url: str):
 # =========================================================
 # Opción A (recomendada): links directos a MP por plan (Checkout Pro)
 MP_LINKS = {
-    "pack_50_m":  st.secrets.get("MP_PACK_50_M_URL",  ""),
-    "pack_150_m": st.secrets.get("MP_PACK_150_M_URL", ""),
-    "pack_300_m": st.secrets.get("MP_PACK_300_M_URL", ""),
-    "pack_500_m": st.secrets.get("MP_PACK_500_M_URL", ""),
-    "pack_50_a":  st.secrets.get("MP_PACK_50_A_URL",  ""),
-    "pack_150_a": st.secrets.get("MP_PACK_150_A_URL", ""),
-    "pack_300_a": st.secrets.get("MP_PACK_300_A_URL", ""),
-    "pack_500_a": st.secrets.get("MP_PACK_500_A_URL", ""),
+    "pack_50_m":  (cfg("MP_PACK_50_M_URL",  "") or "").strip(),
+    "pack_150_m": (cfg("MP_PACK_150_M_URL", "") or "").strip(),
+    "pack_300_m": (cfg("MP_PACK_300_M_URL", "") or "").strip(),
+    "pack_500_m": (cfg("MP_PACK_500_M_URL", "") or "").strip(),
+    "pack_50_a":  (cfg("MP_PACK_50_A_URL",  "") or "").strip(),
+    "pack_150_a": (cfg("MP_PACK_150_A_URL", "") or "").strip(),
+    "pack_300_a": (cfg("MP_PACK_300_A_URL", "") or "").strip(),
+    "pack_500_a": (cfg("MP_PACK_500_A_URL", "") or "").strip(),
 }
 
-# Opción B (si ya tenés HTML/JS y querés embed): lo podés guardar en secrets o pegarlo acá
-MP_EMBED_HTML = st.secrets.get("MP_EMBED_HTML", "")
+# Opción B (si ya tenés HTML/JS y querés embed): lo podés guardar en ENV o secrets
+MP_EMBED_HTML = (cfg("MP_EMBED_HTML", "") or "").strip()
 
 # URL de tu login (si usás multipage de Streamlit, esto suele ser "/")
-LOGIN_URL = st.secrets.get("LOGIN_URL", "/")
+LOGIN_URL = (cfg("LOGIN_URL", "/") or "/").strip()
 
 # =========================================================
 # Estilos
@@ -266,7 +279,7 @@ if st.session_state.get("mp_plan"):
         else:
             st.warning(
                 "No encontré el link/HTML de Mercado Pago para este plan.\n\n"
-                "Solución rápida: cargá en Streamlit Secrets las URLs:\n"
+                "Solución rápida: cargá en Render (UI service) las ENV:\n"
                 "MP_PACK_50_M_URL, MP_PACK_150_M_URL, MP_PACK_300_M_URL, MP_PACK_500_M_URL\n"
                 "y (si usás anual) MP_PACK_50_A_URL, etc."
             )
