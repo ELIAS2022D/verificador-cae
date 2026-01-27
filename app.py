@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 import pdfplumber
 import requests
+from PIL import Image
 
 # ===================== BLOQUEAR ENTER EN PASSWORD =====================
 def block_enter_on_password_inputs():
@@ -40,9 +41,11 @@ def block_enter_on_password_inputs():
     )
 
 # ===================== BRANDING + CONFIG =====================
+icon = Image.open("assets/favicon.png")
+
 st.set_page_config(
     page_title="LexaCAE | Verificador CAE",
-    page_icon="assets/favicon.png",
+    page_icon=icon,   # ✅ así sí se ve
     layout="wide",
 )
 
