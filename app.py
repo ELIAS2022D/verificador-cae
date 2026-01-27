@@ -17,13 +17,9 @@ st.set_page_config(
 )
 
 # Header con logo + nombre
-col1, col2 = st.columns([1, 6])
+col1, col2, col3 = st.columns([1, 2, 1])
 with col1:
-    try:
-        st.image("assets/favicon.png", use_container_width=True)
-    except Exception:
-        # si no existe el archivo, no frenamos la app
-        pass
+        st.image("assets/favicon.png", width=260)
 with col2:
     st.markdown("## LexaCAE")
     st.caption("Verificación oficial de CAE contra AFIP (WSCDC)")
