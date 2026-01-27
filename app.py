@@ -9,6 +9,36 @@ import streamlit as st
 import pdfplumber
 import requests
 
+# ===================== BLOQUEAR ENTER EN PASSWORD =====================
+def block_enter_on_password_inputs():
+    st.markdown(
+        """
+        <script>
+        (function() {
+          function attach() {
+            const pw = window.parent.document.querySelectorAll('input[type="password"]');
+            pw.forEach((el) => {
+              if (el.dataset.noenter === "1") return;
+              el.dataset.noenter = "1";
+              el.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  return false;
+                }
+              }, true);
+            });
+          }
+
+          attach();
+          const obs = new MutationObserver(() => attach());
+          obs.observe(window.parent.document.body, { childList: true, subtree: true });
+        })();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # ===================== BRANDING + CONFIG =====================
 st.set_page_config(
     page_title="LexaCAE | Verificador CAE",
@@ -19,12 +49,15 @@ st.set_page_config(
 # Header con logo + nombre
 col1, col2, col3 = st.columns([1, 2, 1])
 with col1:
-        st.image("assets/favicon.png", width=460)
+    st.image("assets/favicon.png", width=460)
 with col2:
-    st.markdown("LexaCAE")
+    st.markdown("# LexaCAE")
     st.caption("## Verificación oficial de CAE contra AFIP (WSCDC)")
 
 st.divider()
+
+# ✅ activar bloqueo de Enter en password (una sola vez)
+block_enter_on_password_inputs()
 
 # ===================== CONFIG APP =====================
 st.title("Verificador de CAE")
