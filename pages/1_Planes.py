@@ -21,6 +21,9 @@ def cfg(key: str, default: str = "") -> str:
 def money_ar(n: int) -> str:
     return f"{n:,}".replace(",", ".")
 
+def soft_redirect(url: str):
+    st.markdown(f"<meta http-equiv='refresh' content='0; url={url}'>", unsafe_allow_html=True)
+
 # =========================================================
 # Config (URLs)
 # =========================================================
@@ -35,34 +38,95 @@ MP_LINKS = {
     "pack_500_a": (cfg("MP_PACK_500_A_URL", "") or "").strip(),
 }
 
-# Opción B (si ya tenés HTML/JS y querés embed)
 MP_EMBED_HTML = (cfg("MP_EMBED_HTML", "") or "").strip()
 
-# URL de tu login (si usás multipage de Streamlit, esto suele ser "/")
+# Ruta del login/app (si usás multipage puede ser "/")
 LOGIN_URL = (cfg("LOGIN_URL", "/") or "/").strip()
 
-# Anchor / Links del navbar
-TARIFAS_URL = (cfg("TARIFAS_URL", "#planes") or "#planes").strip()
+# Si querés que "app" vaya a otro lado distinto del login:
+APP_URL = (cfg("APP_URL", "") or "").strip() or LOGIN_URL
 
-# Path dentro del repo (NO usar D:\... en producción)
+# Imagen local dentro del repo
 HERO_IMAGE_PATH = (cfg("HERO_IMAGE_PATH", "assets/mujerAdmin.jpeg") or "assets/mujerAdmin.jpeg").strip()
 
 # =========================================================
-# CSS (consistente con Streamlit + estilo mock)
+# CSS (moderno + sidebar)
 # =========================================================
 st.markdown(
     """
 <style>
-/* ========= Streamlit base cleanup (sin romper consistencia) ========= */
+/* ====== Base ====== */
 .block-container{
-  padding: 0 !important;
-  max-width: 100% !important;
+  padding-top: 14px !important;
+  padding-bottom: 26px !important;
+  max-width: 1200px !important;
 }
-section[data-testid="stSidebar"]{ display:none; }
 header[data-testid="stHeader"]{ background: transparent; }
 div[data-testid="stToolbar"]{ display:none; }
 
-/* ========= Colores ========= */
+/* ====== Sidebar moderno ====== */
+section[data-testid="stSidebar"]{
+  background: #f6f8fc;
+  border-right: 1px solid rgba(15,23,42,.08);
+}
+section[data-testid="stSidebar"] .stSidebarContent{
+  padding-top: 18px;
+}
+.sidebar-brand{
+  font-weight: 900;
+  font-size: 18px;
+  color: #0b4fb3;
+  letter-spacing: .2px;
+  margin-bottom: 10px;
+}
+.sidebar-sub{
+  font-size: 12px;
+  color: rgba(15,23,42,.55);
+  margin-top: -8px;
+  margin-bottom: 14px;
+}
+
+/* Pills del radio (App / Planes) */
+div[role="radiogroup"] > label{
+  width: 100%;
+}
+div[role="radiogroup"] label{
+  padding: 10px 10px !important;
+  border-radius: 12px !important;
+  border: 1px solid rgba(15,23,42,.10) !important;
+  background: white !important;
+  margin: 6px 0 !important;
+  transition: all .15s ease;
+}
+div[role="radiogroup"] label:hover{
+  border-color: rgba(11,79,179,.25) !important;
+  box-shadow: 0 8px 18px rgba(2,6,23,.06);
+}
+div[role="radiogroup"] label[data-baseweb="radio"]{
+  gap: 10px;
+}
+
+/* Sección Login */
+.sidebar-card{
+  background: white;
+  border: 1px solid rgba(15,23,42,.10);
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: 0 10px 22px rgba(2,6,23,.06);
+}
+.sidebar-title{
+  font-size: 16px;
+  font-weight: 900;
+  color: #0f172a;
+  margin: 0 0 8px 0;
+}
+.sidebar-help{
+  font-size: 12px;
+  color: rgba(15,23,42,.55);
+  margin: 0 0 12px 0;
+}
+
+/* ====== Main (Hero + Cards) ====== */
 :root{
   --blue:#0b4fb3;
   --blue-dark:#083a86;
@@ -73,77 +137,36 @@ div[data-testid="stToolbar"]{ display:none; }
   --border: rgba(15, 23, 42, 0.12);
 }
 
-/* ========= Navbar ========= */
-.navbar{
-  width:100%;
-  background: var(--blue);
-  padding: 10px 22px; /* ajustado para evitar "aire" */
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-}
-.brand{
-  color:#fff;
-  font-weight:800;
-  font-size: 22px;
-  letter-spacing: 0.2px;
-}
-.navlinks{
-  display:flex;
-  gap:18px;
-  align-items:center;
-}
-.navlinks a{
-  color:#dbeafe;
-  text-decoration:none;
-  font-weight:600;
-  font-size: 14px;
-}
-.navlinks a:hover{ color:#fff; }
-.loginbtn{
-  color:#fff !important;
-  border: 2px solid rgba(255,255,255,.75);
-  padding: 6px 14px;
-  border-radius: 999px;
-  font-weight: 800;
-}
-
-/* ========= Hero ========= */
 .hero-wrap{
-  width:100%;
-  background: #ffffff;
-  padding: 18px 22px 10px 22px; /* ajustado, elimina franja blanca grande */
-}
-.hero-inner{
-  max-width: 1200px;
-  margin: 0 auto;
+  background: linear-gradient(180deg, rgba(11,79,179,.06), rgba(11,79,179,0));
+  border: 1px solid rgba(15,23,42,.08);
+  border-radius: 18px;
+  padding: 18px 18px;
+  box-shadow: 0 14px 32px rgba(2,6,23,.06);
 }
 .hero-title{
-  font-size: 34px;
-  font-weight: 900;
+  font-size: 30px;
+  font-weight: 950;
   color: var(--text);
-  margin: 4px 0 8px 0;
+  margin: 2px 0 6px 0;
 }
 .hero-sub{
-  font-size: 16px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 900;
   color: var(--blue);
-  margin: 0 0 12px 0;
+  margin: 0 0 10px 0;
 }
 .hero-p{
   color: var(--muted);
-  line-height: 1.6;
-  font-size: 14px;
-  max-width: 650px;
-}
-.how{
-  margin-top: 16px;
+  line-height: 1.65;
+  font-size: 13.5px;
+  max-width: 680px;
 }
 .how h4{
-  margin: 0 0 10px 0;
-  font-size: 14px;
+  margin: 12px 0 8px 0;
+  font-size: 13px;
   color: var(--text);
-  font-weight: 900;
+  font-weight: 950;
 }
 .how ol{
   margin: 0 0 10px 18px;
@@ -151,60 +174,47 @@ div[data-testid="stToolbar"]{ display:none; }
   font-size: 13px;
 }
 .hero-note{
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--text);
-  font-weight: 700;
+  font-weight: 800;
 }
 .cta{
-  margin-top: 16px;
   display:inline-block;
-  padding: 11px 18px;
+  padding: 10px 14px;
   border-radius: 999px;
-  border: 2px solid rgba(11,79,179,.35);
+  border: 1.5px solid rgba(11,79,179,.35);
   background: #fff;
   color: var(--blue-dark);
-  font-weight: 900;
+  font-weight: 950;
   text-decoration:none;
+  margin-top: 10px;
 }
-.cta:hover{
-  background: rgba(11,79,179,.06);
-}
+.cta:hover{ background: rgba(11,79,179,.06); }
 
-/* Imagen del hero (st.image) más chica y prolija */
 .hero-img-wrap img{
   border-radius: 16px !important;
   object-fit: cover;
-  box-shadow: 0 18px 45px rgba(2, 6, 23, 0.12);
+  box-shadow: 0 18px 45px rgba(2, 6, 23, 0.10);
   border: 1px solid rgba(2, 6, 23, 0.08);
-  max-width: 320px !important; /* clave: imagen más chica */
+  max-width: 280px !important; /* más chica */
   margin-left: auto;
   display: block;
 }
 
-/* ========= Sección planes ========= */
-.plans-wrap{
-  width:100%;
-  background: var(--bg-soft);
-  padding: 40px 26px 46px 26px;
-  border-top: 6px solid rgba(11,79,179,.20);
-}
-.plans-inner{
-  max-width: 1200px;
-  margin: 0 auto;
-}
-.plans-title{
+/* planes */
+.section-title{
   text-align:center;
-  font-size: 30px;
-  font-weight: 900;
+  font-size: 24px;
+  font-weight: 950;
   color: var(--text);
-  margin: 0 0 10px 0;
+  margin: 18px 0 10px 0;
 }
 
-/* ========= Cards ========= */
+/* cards */
 .plan-card{
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 16px;
   padding: 18px 18px 16px 18px;
   box-shadow: 0 14px 35px rgba(2, 6, 23, 0.08);
   position: relative;
@@ -215,27 +225,27 @@ div[data-testid="stToolbar"]{ display:none; }
   margin: 8px 0 14px 0;
 }
 .plan-name{
-  font-size: 20px;
-  font-weight: 900;
+  font-size: 18px;
+  font-weight: 950;
   color: var(--blue-dark);
   margin: 0 0 4px 0;
 }
 .plan-price{
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 950;
   margin: 8px 0 6px 0;
   color: #111827;
 }
 .plan-muted{
-  font-size: 13px;
+  font-size: 12.5px;
   color: #334155;
-  font-weight: 700;
+  font-weight: 800;
 }
 .plan-meta{
-  margin-top: 12px;
-  font-size: 13px;
+  margin-top: 10px;
+  font-size: 12.5px;
   color: #111827;
-  font-weight: 800;
+  font-weight: 900;
 }
 
 .popular-ribbon{
@@ -244,30 +254,28 @@ div[data-testid="stToolbar"]{ display:none; }
   left: 0;
   right: 0;
   height: 26px;
-  border-top-left-radius: 14px;
-  border-top-right-radius: 14px;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
   background: #0b2d57;
   color:#fff;
-  font-weight: 900;
+  font-weight: 950;
   font-size: 12px;
   display:flex;
   align-items:center;
   justify-content:center;
 }
 .popular{
-  border: 2px solid rgba(11,79,179,.35);
+  border: 2px solid rgba(11,79,179,.30);
 }
 
-/* ========= Checkout ========= */
 .checkout{
-  max-width: 1200px;
-  margin: 26px auto 0 auto;
+  margin-top: 16px;
   padding: 0 2px;
 }
 
 /* responsive */
 @media (max-width: 1020px){
-  .hero-title{ font-size: 28px; }
+  .hero-title{ font-size: 26px; }
   .hero-img-wrap img{ max-width: 100% !important; }
 }
 </style>
@@ -276,75 +284,114 @@ div[data-testid="stToolbar"]{ display:none; }
 )
 
 # =========================================================
-# HERO (Streamlit nativo + imagen chica)
+# Sidebar: navegación + login
 # =========================================================
-with st.container():
-    st.markdown("<div class='hero-wrap'><div class='hero-inner'>", unsafe_allow_html=True)
+with st.sidebar:
+    st.markdown("<div class='sidebar-brand'>lexaCAE</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sidebar-sub'>Verificación de CAE (AFIP) · WSCDC</div>", unsafe_allow_html=True)
 
-    hero_l, hero_r = st.columns([1.35, 0.65], gap="large")  # imagen más chica
+    # Navegación
+    if "nav" not in st.session_state:
+        st.session_state["nav"] = "Planes"
 
-    with hero_l:
-        st.markdown(
-            """
-            <div class="hero-title">Verificación de CAE de Facturas AFIP en segundos.</div>
-            <div class="hero-sub">Servicio de validación de CAE para facturas electrónicas</div>
-            <div class="hero-p">
-              Nuestro sistema permite verificar CAE de facturas AFIP, confirmando que el comprobante fue autorizado correctamente.
-              Ideal para empresas que necesitan validar facturas recibidas, evitar comprobantes apócrifos y reducir riesgos impositivos.
-            </div>
+    nav = st.radio(
+        label="",
+        options=["app", "Planes"],
+        index=1 if st.session_state["nav"] == "Planes" else 0,
+        key="nav_radio",
+        label_visibility="collapsed",
+    )
+    st.session_state["nav"] = nav
 
-            <div class="how">
-              <h4>¿Cómo funciona?</h4>
-              <ol>
-                <li>Subí una o varias facturas electrónicas</li>
-                <li>El sistema lee los datos fiscales (CUIT, punto de venta, número, CAE)</li>
-                <li>Se consulta automáticamente a AFIP</li>
-                <li>Obtenés el resultado de <b>CAE válido</b> o <b>inválido</b></li>
-              </ol>
-              <div class="hero-note">Proceso rápido, automático y online.</div>
-            </div>
+    # Acción navegación
+    if nav == "app":
+        # te manda al login/app real
+        soft_redirect(APP_URL)
 
-            <a class="cta" href="#planes">Conocé nuestros Planes</a>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown("<hr style='border:none;height:1px;background:rgba(15,23,42,.10);margin:14px 0;'>", unsafe_allow_html=True)
 
-    with hero_r:
-        st.markdown("<div class='hero-img-wrap'>", unsafe_allow_html=True)
-        st.image(HERO_IMAGE_PATH, use_container_width=False)
-        st.markdown("</div>", unsafe_allow_html=True)
+    # Login Card (visual)
+    st.markdown("<div class='sidebar-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='sidebar-title'>Acceso</div>", unsafe_allow_html=True)
+    st.markdown("<div class='sidebar-help'>Ingresá tus credenciales para usar la app.</div>", unsafe_allow_html=True)
 
-    st.markdown("</div></div>", unsafe_allow_html=True)
+    cuit = st.text_input("CUIT (sin guiones)", value=st.session_state.get("cuit", ""), key="sidebar_cuit")
+    pwd = st.text_input("Contraseña", type="password", value="", key="sidebar_pwd")
+
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("Ingresar", use_container_width=True):
+            # Guardamos en session por si lo querés usar en tu app real
+            st.session_state["cuit"] = cuit.strip()
+            # Si querés redirigir al login real al tocar ingresar:
+            soft_redirect(LOGIN_URL)
+
+    with b2:
+        if st.button("Salir", use_container_width=True):
+            st.session_state.pop("cuit", None)
+            st.session_state.pop("mp_plan", None)
+            st.session_state.pop("mp_is_annual", None)
+            st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# PLANES (sección celeste + título)
+# MAIN: HERO + PLANES + CHECKOUT
 # =========================================================
+# HERO
+st.markdown("<div class='hero-wrap'>", unsafe_allow_html=True)
+
+hero_l, hero_r = st.columns([1.45, 0.55], gap="large")
+
+with hero_l:
+    st.markdown(
+        """
+        <div class="hero-title">Verificación de CAE de Facturas AFIP en segundos.</div>
+        <div class="hero-sub">Servicio de validación de CAE para facturas electrónicas</div>
+        <div class="set_hack></div>
+        <div class="hero-p">
+          Nuestro sistema permite verificar CAE de facturas AFIP, confirmando que el comprobante fue autorizado correctamente.
+          Ideal para empresas que necesitan validar facturas recibidas, evitar comprobantes apócrifos y reducir riesgos impositivos.
+        </div>
+
+        <div class="how">
+          <h4>¿Cómo funciona?</h4>
+          <ol>
+            <li>Subí una o varias facturas electrónicas</li>
+            <li>El sistema lee los datos fiscales (CUIT, punto de venta, número, CAE)</li>
+            <li>Se consulta automáticamente a AFIP</li>
+            <li>Obtenés el resultado de <b>CAE válido</b> o <b>inválido</b></li>
+          </ol>
+          <div class="hero-note">Proceso rápido, automático y online.</div>
+        </div>
+
+        <a class="cta" href="#planes">Ver planes</a>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with hero_r:
+    st.markdown("<div class='hero-img-wrap'>", unsafe_allow_html=True)
+    st.image(HERO_IMAGE_PATH, use_container_width=False)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ANCHOR
 st.markdown('<div id="planes"></div>', unsafe_allow_html=True)
 
-st.markdown(
-    """
-<div class="plans-wrap">
-  <div class="plans-inner">
-    <div class="plans-title">Una solución para cada necesidad</div>
-  </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# Para que el contenido quede sobre el fondo celeste
-st.markdown("<div class='plans-wrap'><div class='plans-inner'>", unsafe_allow_html=True)
-
-c1, c2, c3 = st.columns([3, 2.2, 3])
-with c2:
+# Planes header + toggle
+st.markdown("<div class='section-title'>Una solución para cada necesidad</div>", unsafe_allow_html=True)
+ct1, ct2, ct3 = st.columns([3, 2.2, 3])
+with ct2:
     anual = st.toggle("Planes anuales (Ahorrá 25%)", value=False)
 
 # Planes (manteniendo tu pricing + lógica MP)
 plans = [
-    {"id": "pack_50",  "title": "Starter",   "monthly": 12041, "annual": 9031,  "qty": "50 facturas",   "featured": False},
-    {"id": "pack_150", "title": "Pro",       "monthly": 24423, "annual": 18317, "qty": "150 facturas",  "featured": False},
-    {"id": "pack_300", "title": "Advance",   "monthly": 32987, "annual": 24740, "qty": "300 facturas",  "featured": True},   # Más popular
-    {"id": "pack_500", "title": "Enterprise","monthly": 40614, "annual": 30460, "qty": "500+ facturas", "featured": False, "enterprise": True},
+    {"id": "pack_50",  "title": "Starter",    "monthly": 12041, "annual": 9031,  "qty": "50 facturas",   "featured": False},
+    {"id": "pack_150", "title": "Pro",        "monthly": 24423, "annual": 18317, "qty": "150 facturas",  "featured": False},
+    {"id": "pack_300", "title": "Advance",    "monthly": 32987, "annual": 24740, "qty": "300 facturas",  "featured": True},   # Más popular
+    {"id": "pack_500", "title": "Enterprise", "monthly": 40614, "annual": 30460, "qty": "500+ facturas", "featured": False, "enterprise": True},
 ]
 
 cols = st.columns(4, gap="large")
@@ -392,8 +439,6 @@ for idx, p in enumerate(plans):
                 st.session_state["mp_plan"] = p["id"]
                 st.session_state["mp_is_annual"] = bool(anual)
 
-st.markdown("</div></div>", unsafe_allow_html=True)
-
 # =========================================================
 # Checkout Mercado Pago
 # =========================================================
@@ -416,7 +461,7 @@ if st.session_state.get("mp_plan"):
             f"""
             <a href="{mp_url}" target="_blank" style="text-decoration:none;">
               <div style="padding:14px 16px;border-radius:14px;border:1px solid rgba(148,163,184,.35);
-                          background: rgba(34,197,94,.12); display:inline-block; font-weight:800;">
+                          background: rgba(34,197,94,.12); display:inline-block; font-weight:900;">
                 Ir a Mercado Pago →
               </div>
             </a>
