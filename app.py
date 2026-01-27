@@ -41,7 +41,7 @@ def block_enter_on_password_inputs():
     )
 
 # ===================== BRANDING + CONFIG =====================
-icon = Image.open("assets/favicon.png")
+icon = Image.open("assets/logo_Sitio.png")
 
 st.set_page_config(
     page_title="LexaCAE | Verificador CAE",
