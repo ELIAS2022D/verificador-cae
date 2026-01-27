@@ -1,3 +1,4 @@
+import os
 import io
 import zipfile
 import re
@@ -32,13 +33,14 @@ st.divider()
 # ===================== CONFIG APP =====================
 st.title("Verificador de CAE")
 
-BASE_URL = st.secrets.get("BASE_URL", "")
-DEFAULT_BACKEND_API_KEY = st.secrets.get("BACKEND_API_KEY", "")
-LOGIN_CUIT_DEFAULT = st.secrets.get("LOGIN_CUIT_DEFAULT", "")
+# ✅ Render ENV VARS (no st.secrets)
+BASE_URL = os.getenv("BASE_URL", "").strip()
+DEFAULT_BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "").strip()
+LOGIN_CUIT_DEFAULT = os.getenv("LOGIN_CUIT_DEFAULT", "").strip()
 
 # Límite opcional por seguridad (si está vacío o no existe => ilimitado)
-MAX_FILES_RAW = st.secrets.get("MAX_FILES", None)
-BATCH_SIZE = int(st.secrets.get("BATCH_SIZE", 50))
+MAX_FILES_RAW = os.getenv("MAX_FILES", None)
+BATCH_SIZE_RAW = os.getenv("BATCH_SIZE", "50")
 
 
 def _parse_int_or_none(x):
@@ -54,8 +56,19 @@ def _parse_int_or_none(x):
 
 MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
 
+try:
+    BATCH_SIZE = int(BATCH_SIZE_RAW)
+except Exception:
+    BATCH_SIZE = 50
+
+if BATCH_SIZE <= 0:
+    BATCH_SIZE = 50
+
+# Normalizar BASE_URL sin trailing slash
+BASE_URL = BASE_URL.rstrip("/")
+
 if not BASE_URL:
-    st.error("Falta BASE_URL en Secrets de Streamlit (Settings → Secrets).")
+    st.error("Falta BASE_URL en Render (Environment Variables). Ej: https://tu-backend.onrender.com")
     st.stop()
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
@@ -69,11 +82,11 @@ CAE_PATTERNS = [
 VTO_PATTERNS = [
     re.compile(
         r"(?:Fecha\s+de\s+)?(?:Vto\.?\s*de\s*CAE|Vto\.?\s*CAE|Vencimiento\s*CAE|CAE\s*Vto\.?)\D{0,30}(\d{2}[/-]\d{2}[/-]\d{4})",
-        re.IGNORECASE
+        re.IGNORECASE,
     ),
     re.compile(
         r"(?:Fecha\s+de\s+)?(?:Vto\.?\s*de\s*CAE|Vto\.?\s*CAE|Vencimiento\s*CAE|CAE\s*Vto\.?)\D{0,30}(\d{4}[/-]\d{2}[/-]\d{2})",
-        re.IGNORECASE
+        re.IGNORECASE,
     ),
 ]
 
@@ -85,7 +98,7 @@ def find_first(patterns, text: str):
             return m.group(1)
     idx = text.lower().find("cae")
     if idx != -1:
-        window = text[idx: idx + 250]
+        window = text[idx : idx + 250]
         m2 = re.search(r"(\d{14})", window)
         if m2:
             return m2.group(1)
@@ -123,7 +136,7 @@ def ensure_auth_state():
             "logged": False,
             "api_key": DEFAULT_BACKEND_API_KEY,
             "access_token": "",
-            "cuit": ""
+            "cuit": "",
         }
 
 
@@ -193,7 +206,7 @@ def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
 def chunk_list(items, size: int):
     if size <= 0:
         return [items]
-    return [items[i:i + size] for i in range(0, len(items), size)]
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 # ===================== SIDEBAR: LOGIN =====================
@@ -201,7 +214,10 @@ with st.sidebar:
     st.subheader("Acceso")
     api_key = st.session_state.auth["api_key"]
 
-    cuit_login = st.text_input("CUIT (sin guiones)", value=st.session_state.auth["cuit"] or LOGIN_CUIT_DEFAULT)
+    cuit_login = st.text_input(
+        "CUIT (sin guiones)",
+        value=st.session_state.auth["cuit"] or LOGIN_CUIT_DEFAULT,
+    )
     password = st.text_input("Contraseña", type="password")
 
     colA, colB = st.columns(2)
@@ -213,7 +229,7 @@ with st.sidebar:
                     "logged": True,
                     "api_key": api_key,
                     "access_token": token,
-                    "cuit": cuit_login
+                    "cuit": cuit_login,
                 }
                 st.success("Sesión iniciada.")
                 st.rerun()
@@ -226,7 +242,7 @@ with st.sidebar:
                 "logged": False,
                 "api_key": DEFAULT_BACKEND_API_KEY,
                 "access_token": "",
-                "cuit": ""
+                "cuit": "",
             }
             st.rerun()
 
@@ -301,7 +317,7 @@ help_text = "sin límite" if MAX_FILES is None else f"hasta {MAX_FILES}"
 mode = st.radio(
     "Modo de carga",
     [f"PDFs ({help_text})", f"ZIP (contiene PDFs) ({help_text})"],
-    horizontal=True
+    horizontal=True,
 )
 
 pdf_files = []
@@ -325,7 +341,7 @@ else:
                     if MAX_FILES is not None and len(names) > MAX_FILES:
                         st.warning(f"El ZIP tiene {len(names)} PDFs. Por configuración se procesarán solo {MAX_FILES}.")
                         names = names[:MAX_FILES]
-                    pdf_files = [{"name": n.split('/')[-1], "bytes": z.read(n)} for n in names]
+                    pdf_files = [{"name": n.split("/")[-1], "bytes": z.read(n)} for n in names]
                     st.success(f"PDFs detectados: {len(pdf_files)}")
         except zipfile.BadZipFile:
             st.error("ZIP inválido o dañado.")
@@ -357,29 +373,31 @@ if pdf_files:
             else:
                 status.append("Vto no detectado")
 
-            rows.append({
-                "Archivo": f["name"],
-                "CAE": cae or "",
-                "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
-                "Estado": " | ".join(status),
-                "AFIP": "",
-                "Detalle AFIP": "",
-            })
+            rows.append(
+                {
+                    "Archivo": f["name"],
+                    "CAE": cae or "",
+                    "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
+                    "Estado": " | ".join(status),
+                    "AFIP": "",
+                    "Detalle AFIP": "",
+                }
+            )
         except Exception as e:
-            rows.append({
-                "Archivo": f["name"],
-                "CAE": "",
-                "Vto CAE": "",
-                "Estado": f"Error al leer el PDF: {e}",
-                "AFIP": "",
-                "Detalle AFIP": "",
-            })
+            rows.append(
+                {
+                    "Archivo": f["name"],
+                    "CAE": "",
+                    "Vto CAE": "",
+                    "Estado": f"Error al leer el PDF: {e}",
+                    "AFIP": "",
+                    "Detalle AFIP": "",
+                }
+            )
 
         progress.progress(i / len(pdf_files))
 
-df = pd.DataFrame(rows) if rows else pd.DataFrame(
-    columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]
-)
+df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
 
 st.subheader("Vista previa (datos detectados en el PDF)")
 st.dataframe(df, use_container_width=True)
@@ -387,7 +405,6 @@ st.dataframe(df, use_container_width=True)
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
 st.subheader("Validación contra AFIP")
 st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
-
 st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDFs (ajustable).")
 
 if st.button("Validar ahora", use_container_width=True):
