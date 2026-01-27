@@ -20,7 +20,7 @@ st.set_page_config(
 col1, col2 = st.columns([1, 6])
 with col1:
     try:
-        st.image("assets/favicon.png", width=70)
+        st.image("assets/favicon.png", width=300)
     except Exception:
         # si no existe el archivo, no frenamos la app
         pass
