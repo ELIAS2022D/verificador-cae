@@ -10,7 +10,7 @@ import requests
 
 # ===================== BRANDING + CONFIG =====================
 st.set_page_config(
-    page_title="LexaCAE | Verificador AFIP",
+    page_title="LexaCAE | Verificador CAE AFIP",
     page_icon="🧾",  # podés cambiar por "assets/favicon.png"
     layout="wide",
 )
@@ -24,7 +24,7 @@ with col1:
         # si no existe el archivo, no frenamos la app
         pass
 with col2:
-    st.markdown("LexaCAE")
+    st.markdown("## LexaCAE")
     st.caption("Verificación oficial de CAE contra AFIP (WSCDC)")
 
 st.divider()
