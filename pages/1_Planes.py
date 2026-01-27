@@ -276,22 +276,6 @@ div[data-testid="stToolbar"]{ display:none; }
 )
 
 # =========================================================
-# Navbar
-# =========================================================
-st.markdown(
-    f"""
-<div class="navbar">
-  <div class="brand">lexaCAE</div>
-  <div class="navlinks">
-    <a href="{TARIFAS_URL}">Tarifas</a>
-    <a class="loginbtn" href="{LOGIN_URL}">LOGIN</a>
-  </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# =========================================================
 # HERO (Streamlit nativo + imagen chica)
 # =========================================================
 with st.container():
