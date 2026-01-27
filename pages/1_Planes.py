@@ -26,6 +26,7 @@ def money_ar(n: int) -> str:
     return f"{n:,}".replace(",", ".")
 
 def soft_redirect(url: str):
+    # redirect simple dentro de Streamlit (sirve para volver a pantalla inicial)
     st.markdown(f"<meta http-equiv='refresh' content='0; url={url}'>", unsafe_allow_html=True)
 
 # =========================================================
@@ -41,88 +42,52 @@ MP_LINKS = {
     "pack_300_a": (cfg("MP_PACK_300_A_URL", "") or "").strip(),
     "pack_500_a": (cfg("MP_PACK_500_A_URL", "") or "").strip(),
 }
+
 MP_EMBED_HTML = (cfg("MP_EMBED_HTML", "") or "").strip()
 
-LOGIN_URL = (cfg("LOGIN_URL", "/") or "/").strip()
-APP_URL = (cfg("APP_URL", "") or "").strip() or LOGIN_URL
+# Pantalla inicial del sistema (tu home / login)
+HOME_URL = (cfg("HOME_URL", "/") or "/").strip()
 
+# Si querés que "app" vaya a otra URL distinta del home:
+APP_URL = (cfg("APP_URL", "") or "").strip() or HOME_URL
+
+# Imagen local dentro del repo
 HERO_IMAGE_PATH = (cfg("HERO_IMAGE_PATH", "assets/mujerAdmin.jpeg") or "assets/mujerAdmin.jpeg").strip()
 
 # =========================================================
-# CSS (moderno + sidebar fija)
+# CSS (moderno + sidebar, SIN hacks de sidebar fija)
 # =========================================================
 st.markdown(
     """
 <style>
-/* ====== ANCHO sidebar fijo ====== */
-:root{
-  --sidebar-w: 22rem; /* <-- ajustá acá (ej 20rem / 24rem) */
-  --blue:#0b4fb3;
-  --blue-dark:#083a86;
-  --card:#ffffff;
-  --text:#0f172a;
-  --muted:#475569;
-  --border: rgba(15, 23, 42, 0.12);
-}
-
 /* ====== Base ====== */
+.block-container{
+  padding-top: 14px !important;
+  padding-bottom: 26px !important;
+  max-width: 1200px !important;
+}
 header[data-testid="stHeader"]{ background: transparent; }
 div[data-testid="stToolbar"]{ display:none; }
 
-/* ✅ Mostrar botón de colapsar (<<) */
+/* ✅ Importante: NO ocultar el colapsador del sidebar (<<) */
 button[data-testid="collapsedControl"]{
   display: block !important;
   opacity: 1 !important;
   visibility: visible !important;
 }
 
-/* ====== Sidebar fija ====== */
+/* ====== Sidebar moderno ====== */
 section[data-testid="stSidebar"]{
-  position: fixed !important;
-  top: 0;
-  left: 0;
-  height: 100vh !important;
-  width: var(--sidebar-w) !important;
-  min-width: var(--sidebar-w) !important;
-  max-width: var(--sidebar-w) !important;
   background: #f6f8fc;
   border-right: 1px solid rgba(15,23,42,.08);
-  overflow-y: auto !important;
-  z-index: 999 !important;
 }
 section[data-testid="stSidebar"] .stSidebarContent{
   padding-top: 18px;
 }
-
-/* ====== Main: corrimiento para no tapar contenido ====== */
-div[data-testid="stAppViewContainer"]{
-  margin-left: var(--sidebar-w) !important;
-}
-.block-container{
-  padding-top: 14px !important;
-  padding-bottom: 26px !important;
-  max-width: 1200px !important;
-}
-
-/* En mobile: volvemos a comportamiento normal (sidebar overlay) */
-@media (max-width: 900px){
-  section[data-testid="stSidebar"]{
-    position: relative !important;
-    width: auto !important;
-    min-width: unset !important;
-    max-width: unset !important;
-    height: auto !important;
-  }
-  div[data-testid="stAppViewContainer"]{
-    margin-left: 0 !important;
-  }
-}
-
-/* ====== Sidebar moderno ====== */
 .sidebar-brand{
   font-weight: 900;
   font-size: 18px;
-  color: var(--blue);
+  color: #0b4fb3;
   letter-spacing: .2px;
   margin-bottom: 10px;
 }
@@ -134,7 +99,9 @@ div[data-testid="stAppViewContainer"]{
 }
 
 /* Pills del radio (App / Planes) */
-div[role="radiogroup"] > label{ width: 100%; }
+div[role="radiogroup"] > label{
+  width: 100%;
+}
 div[role="radiogroup"] label{
   padding: 10px 10px !important;
   border-radius: 12px !important;
@@ -148,7 +115,7 @@ div[role="radiogroup"] label:hover{
   box-shadow: 0 8px 18px rgba(2,6,23,.06);
 }
 
-/* Card login */
+/* Sección Login */
 .sidebar-card{
   background: white;
   border: 1px solid rgba(15,23,42,.10);
@@ -159,7 +126,7 @@ div[role="radiogroup"] label:hover{
 .sidebar-title{
   font-size: 16px;
   font-weight: 900;
-  color: var(--text);
+  color: #0f172a;
   margin: 0 0 8px 0;
 }
 .sidebar-help{
@@ -168,7 +135,16 @@ div[role="radiogroup"] label:hover{
   margin: 0 0 12px 0;
 }
 
-/* ====== Hero ====== */
+/* ====== Main (Hero + Cards) ====== */
+:root{
+  --blue:#0b4fb3;
+  --blue-dark:#083a86;
+  --card:#ffffff;
+  --text:#0f172a;
+  --muted:#475569;
+  --border: rgba(15, 23, 42, 0.12);
+}
+
 .hero-wrap{
   background: linear-gradient(180deg, rgba(11,79,179,.06), rgba(11,79,179,0));
   border: 1px solid rgba(15,23,42,.08);
@@ -210,6 +186,8 @@ div[role="radiogroup"] label:hover{
   color: var(--text);
   font-weight: 800;
 }
+
+/* Imagen del hero */
 .hero-img-wrap img{
   border-radius: 16px !important;
   object-fit: cover;
@@ -220,7 +198,27 @@ div[role="radiogroup"] label:hover{
   display: block;
 }
 
-/* ====== Planes ====== */
+/* Botón volver (main) */
+.back-wrap{
+  display:flex;
+  justify-content:flex-end;
+  margin-bottom: 10px;
+}
+.back-btn{
+  display:inline-block;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1.5px solid rgba(11,79,179,.25);
+  background: rgba(11,79,179,.06);
+  color: var(--blue-dark);
+  font-weight: 900;
+  text-decoration:none;
+}
+.back-btn:hover{
+  background: rgba(11,79,179,.10);
+}
+
+/* planes */
 .section-title{
   text-align:center;
   font-size: 24px;
@@ -228,6 +226,8 @@ div[role="radiogroup"] label:hover{
   color: var(--text);
   margin: 18px 0 10px 0;
 }
+
+/* cards */
 .plan-card{
   background: var(--card);
   border: 1px solid var(--border);
@@ -264,6 +264,7 @@ div[role="radiogroup"] label:hover{
   color: #111827;
   font-weight: 900;
 }
+
 .popular-ribbon{
   position:absolute;
   top: 0;
@@ -283,11 +284,13 @@ div[role="radiogroup"] label:hover{
 .popular{
   border: 2px solid rgba(11,79,179,.30);
 }
+
 .checkout{
   margin-top: 16px;
   padding: 0 2px;
 }
 
+/* responsive */
 @media (max-width: 1020px){
   .hero-title{ font-size: 26px; }
   .hero-img-wrap img{ max-width: 100% !important; }
@@ -298,12 +301,13 @@ div[role="radiogroup"] label:hover{
 )
 
 # =========================================================
-# Sidebar: navegación + login
+# Sidebar: navegación + login + botón volver (sidebar)
 # =========================================================
 with st.sidebar:
     st.markdown("<div class='sidebar-brand'>lexaCAE</div>", unsafe_allow_html=True)
     st.markdown("<div class='sidebar-sub'>Verificación de CAE (AFIP) · WSCDC</div>", unsafe_allow_html=True)
 
+    # Navegación
     if "nav" not in st.session_state:
         st.session_state["nav"] = "Planes"
 
@@ -321,6 +325,13 @@ with st.sidebar:
 
     st.markdown("<hr style='border:none;height:1px;background:rgba(15,23,42,.10);margin:14px 0;'>", unsafe_allow_html=True)
 
+    # Botón volver a pantalla inicial (sidebar)
+    if st.button("🏠 Volver a pantalla inicial", use_container_width=True):
+        soft_redirect(HOME_URL)
+
+    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+
+    # Login Card
     st.markdown("<div class='sidebar-card'>", unsafe_allow_html=True)
     st.markdown("<div class='sidebar-title'>Acceso</div>", unsafe_allow_html=True)
     st.markdown("<div class='sidebar-help'>Ingresá tus credenciales para usar la app.</div>", unsafe_allow_html=True)
@@ -332,7 +343,7 @@ with st.sidebar:
     with b1:
         if st.button("Ingresar", use_container_width=True):
             st.session_state["cuit"] = cuit.strip()
-            soft_redirect(LOGIN_URL)
+            soft_redirect(HOME_URL)
 
     with b2:
         if st.button("Salir", use_container_width=True):
@@ -344,8 +355,20 @@ with st.sidebar:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# MAIN: HERO + PLANES + CHECKOUT
+# MAIN: botón volver + HERO + PLANES + CHECKOUT
 # =========================================================
+
+# Botón volver a pantalla inicial (main, por si colapsan sidebar)
+st.markdown(
+    f"""
+<div class="back-wrap">
+  <a class="back-btn" href="{HOME_URL}">🏠 Volver a pantalla inicial</a>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# HERO
 st.markdown("<div class='hero-wrap'>", unsafe_allow_html=True)
 
 hero_l, hero_r = st.columns([1.45, 0.55], gap="large")
@@ -390,6 +413,7 @@ ct1, ct2, ct3 = st.columns([3, 2.2, 3])
 with ct2:
     anual = st.toggle("Planes anuales (Ahorrá 25%)", value=False)
 
+# Planes (manteniendo tu pricing + lógica MP)
 plans = [
     {"id": "pack_50",  "title": "Starter",    "monthly": 12041, "annual": 9031,  "qty": "50 facturas",   "featured": False},
     {"id": "pack_150", "title": "Pro",        "monthly": 24423, "annual": 18317, "qty": "150 facturas",  "featured": False},
@@ -419,6 +443,7 @@ for idx, p in enumerate(plans):
             if st.button("Obtené una cotización", use_container_width=True, key="quote_enterprise"):
                 st.session_state["mp_plan"] = p["id"]
                 st.session_state["mp_is_annual"] = bool(anual)
+
         else:
             price = p["annual"] if anual else p["monthly"]
             popular = "popular" if p["featured"] else ""
@@ -441,7 +466,9 @@ for idx, p in enumerate(plans):
                 st.session_state["mp_plan"] = p["id"]
                 st.session_state["mp_is_annual"] = bool(anual)
 
-# Checkout
+# =========================================================
+# Checkout Mercado Pago
+# =========================================================
 st.markdown("<div class='checkout'>", unsafe_allow_html=True)
 
 if st.session_state.get("mp_plan"):
