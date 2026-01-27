@@ -11,8 +11,8 @@ import requests
 
 # ===================== BRANDING + CONFIG =====================
 st.set_page_config(
-    page_title="LexaCAE | Verificador CAE AFIP",
-    page_icon="🧾",  # podés cambiar por "assets/favicon.png"
+    page_title="LexaCAE | Verificador CAE",
+    page_icon="assets/favicon.png",
     layout="wide",
 )
 
@@ -20,7 +20,7 @@ st.set_page_config(
 col1, col2 = st.columns([1, 6])
 with col1:
     try:
-        st.image("assets/logo.png", width=70)
+        st.image("assets/favicon.png", width=70)
     except Exception:
         # si no existe el archivo, no frenamos la app
         pass
