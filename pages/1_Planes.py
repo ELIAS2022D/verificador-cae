@@ -41,19 +41,19 @@ MP_EMBED_HTML = (cfg("MP_EMBED_HTML", "") or "").strip()
 # URL de tu login (si usás multipage de Streamlit, esto suele ser "/")
 LOGIN_URL = (cfg("LOGIN_URL", "/") or "/").strip()
 
-# Anchors / Links del navbar
+# Anchor / Links del navbar
 TARIFAS_URL = (cfg("TARIFAS_URL", "#planes") or "#planes").strip()
 
-# Path local dentro del repo (NO usar D:\... en producción)
+# Path dentro del repo (NO usar D:\... en producción)
 HERO_IMAGE_PATH = (cfg("HERO_IMAGE_PATH", "assets/mujerAdmin.jpeg") or "assets/mujerAdmin.jpeg").strip()
 
 # =========================================================
-# CSS (look & feel como el mock)
+# CSS (consistente con Streamlit + estilo mock)
 # =========================================================
 st.markdown(
     """
 <style>
-/* layout general */
+/* ========= Streamlit base cleanup (sin romper consistencia) ========= */
 .block-container{
   padding: 0 !important;
   max-width: 100% !important;
@@ -62,7 +62,7 @@ section[data-testid="stSidebar"]{ display:none; }
 header[data-testid="stHeader"]{ background: transparent; }
 div[data-testid="stToolbar"]{ display:none; }
 
-/* colores */
+/* ========= Colores ========= */
 :root{
   --blue:#0b4fb3;
   --blue-dark:#083a86;
@@ -73,11 +73,11 @@ div[data-testid="stToolbar"]{ display:none; }
   --border: rgba(15, 23, 42, 0.12);
 }
 
-/* navbar */
+/* ========= Navbar ========= */
 .navbar{
   width:100%;
   background: var(--blue);
-  padding: 14px 26px;
+  padding: 10px 22px; /* ajustado para evitar "aire" */
   display:flex;
   justify-content:space-between;
   align-items:center;
@@ -108,11 +108,11 @@ div[data-testid="stToolbar"]{ display:none; }
   font-weight: 800;
 }
 
-/* hero */
+/* ========= Hero ========= */
 .hero-wrap{
   width:100%;
   background: #ffffff;
-  padding: 34px 26px 18px 26px;
+  padding: 18px 22px 10px 22px; /* ajustado, elimina franja blanca grande */
 }
 .hero-inner{
   max-width: 1200px;
@@ -170,15 +170,18 @@ div[data-testid="stToolbar"]{ display:none; }
   background: rgba(11,79,179,.06);
 }
 
-/* Se intenta estilizar la imagen de st.image */
+/* Imagen del hero (st.image) más chica y prolija */
 .hero-img-wrap img{
   border-radius: 16px !important;
   object-fit: cover;
   box-shadow: 0 18px 45px rgba(2, 6, 23, 0.12);
   border: 1px solid rgba(2, 6, 23, 0.08);
+  max-width: 320px !important; /* clave: imagen más chica */
+  margin-left: auto;
+  display: block;
 }
 
-/* sección planes */
+/* ========= Sección planes ========= */
 .plans-wrap{
   width:100%;
   background: var(--bg-soft);
@@ -197,7 +200,7 @@ div[data-testid="stToolbar"]{ display:none; }
   margin: 0 0 10px 0;
 }
 
-/* cards */
+/* ========= Cards ========= */
 .plan-card{
   background: var(--card);
   border: 1px solid var(--border);
@@ -255,7 +258,7 @@ div[data-testid="stToolbar"]{ display:none; }
   border: 2px solid rgba(11,79,179,.35);
 }
 
-/* checkout box */
+/* ========= Checkout ========= */
 .checkout{
   max-width: 1200px;
   margin: 26px auto 0 auto;
@@ -265,6 +268,7 @@ div[data-testid="stToolbar"]{ display:none; }
 /* responsive */
 @media (max-width: 1020px){
   .hero-title{ font-size: 28px; }
+  .hero-img-wrap img{ max-width: 100% !important; }
 }
 </style>
 """,
@@ -288,51 +292,45 @@ st.markdown(
 )
 
 # =========================================================
-# HERO (texto + imagen local assets/)
+# HERO (Streamlit nativo + imagen chica)
 # =========================================================
-st.markdown(
-    """
-<div class="hero-wrap">
-  <div class="hero-inner">
-</div>
-""",
-    unsafe_allow_html=True,
-)
+with st.container():
+    st.markdown("<div class='hero-wrap'><div class='hero-inner'>", unsafe_allow_html=True)
 
-hero_l, hero_r = st.columns([1.1, 0.9], gap="large")
+    hero_l, hero_r = st.columns([1.35, 0.65], gap="large")  # imagen más chica
 
-with hero_l:
-    st.markdown(
-        """
-        <div class="hero-title">Verificación de CAE de Facturas AFIP en segundos.</div>
-        <div class="hero-sub">Servicio de validación de CAE para facturas electrónicas</div>
-        <div class="hero-p">
-          Nuestro sistema permite verificar CAE de facturas AFIP, confirmando que el comprobante fue autorizado correctamente.
-          Ideal para empresas que necesitan validar facturas recibidas, evitar comprobantes apócrifos y reducir riesgos impositivos.
-        </div>
+    with hero_l:
+        st.markdown(
+            """
+            <div class="hero-title">Verificación de CAE de Facturas AFIP en segundos.</div>
+            <div class="hero-sub">Servicio de validación de CAE para facturas electrónicas</div>
+            <div class="hero-p">
+              Nuestro sistema permite verificar CAE de facturas AFIP, confirmando que el comprobante fue autorizado correctamente.
+              Ideal para empresas que necesitan validar facturas recibidas, evitar comprobantes apócrifos y reducir riesgos impositivos.
+            </div>
 
-        <div class="how">
-          <h4>¿Cómo funciona?</h4>
-          <ol>
-            <li>Subí una o varias facturas electrónicas</li>
-            <li>El sistema lee los datos fiscales (CUIT, punto de venta, número, CAE)</li>
-            <li>Se consulta automáticamente a AFIP</li>
-            <li>Obtenés el resultado de <b>CAE válido</b> o <b>inválido</b></li>
-          </ol>
-          <div class="hero-note">Proceso rápido, automático y online.</div>
-        </div>
+            <div class="how">
+              <h4>¿Cómo funciona?</h4>
+              <ol>
+                <li>Subí una o varias facturas electrónicas</li>
+                <li>El sistema lee los datos fiscales (CUIT, punto de venta, número, CAE)</li>
+                <li>Se consulta automáticamente a AFIP</li>
+                <li>Obtenés el resultado de <b>CAE válido</b> o <b>inválido</b></li>
+              </ol>
+              <div class="hero-note">Proceso rápido, automático y online.</div>
+            </div>
 
-        <a class="cta" href="#planes">Conocé nuestros Planes</a>
-        """,
-        unsafe_allow_html=True,
-    )
+            <a class="cta" href="#planes">Conocé nuestros Planes</a>
+            """,
+            unsafe_allow_html=True,
+        )
 
-with hero_r:
-    st.markdown("<div class='hero-img-wrap'>", unsafe_allow_html=True)
-    st.image(HERO_IMAGE_PATH, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    with hero_r:
+        st.markdown("<div class='hero-img-wrap'>", unsafe_allow_html=True)
+        st.image(HERO_IMAGE_PATH, use_container_width=False)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("</div></div>", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 # =========================================================
 # PLANES (sección celeste + título)
@@ -357,41 +355,12 @@ c1, c2, c3 = st.columns([3, 2.2, 3])
 with c2:
     anual = st.toggle("Planes anuales (Ahorrá 25%)", value=False)
 
-# Planes (mantenemos tu pricing + lógica MP)
+# Planes (manteniendo tu pricing + lógica MP)
 plans = [
-    {
-        "id": "pack_50",
-        "title": "Starter",
-        "monthly": 12041,
-        "annual": 9031,
-        "qty": "50 facturas",
-        "featured": False,
-    },
-    {
-        "id": "pack_150",
-        "title": "Pro",
-        "monthly": 24423,
-        "annual": 18317,
-        "qty": "150 facturas",
-        "featured": False,
-    },
-    {
-        "id": "pack_300",
-        "title": "Advance",
-        "monthly": 32987,
-        "annual": 24740,
-        "qty": "300 facturas",
-        "featured": True,   # “Más popular”
-    },
-    {
-        "id": "pack_500",
-        "title": "Enterprise",
-        "monthly": 40614,
-        "annual": 30460,
-        "qty": "500+ facturas",
-        "featured": False,
-        "enterprise": True,
-    },
+    {"id": "pack_50",  "title": "Starter",   "monthly": 12041, "annual": 9031,  "qty": "50 facturas",   "featured": False},
+    {"id": "pack_150", "title": "Pro",       "monthly": 24423, "annual": 18317, "qty": "150 facturas",  "featured": False},
+    {"id": "pack_300", "title": "Advance",   "monthly": 32987, "annual": 24740, "qty": "300 facturas",  "featured": True},   # Más popular
+    {"id": "pack_500", "title": "Enterprise","monthly": 40614, "annual": 30460, "qty": "500+ facturas", "featured": False, "enterprise": True},
 ]
 
 cols = st.columns(4, gap="large")
@@ -399,8 +368,8 @@ cols = st.columns(4, gap="large")
 for idx, p in enumerate(plans):
     with cols[idx]:
         period = "año" if anual else "mes"
-
         is_enterprise = bool(p.get("enterprise", False))
+
         if is_enterprise:
             st.markdown(
                 f"""
@@ -457,7 +426,7 @@ if st.session_state.get("mp_plan"):
     link_key = f"{plan_id}_{suffix}"
     mp_url = (MP_LINKS.get(link_key) or "").strip()
 
-    # Opción A: Link directo
+    # -------- Opción A: Link directo (recomendada) --------
     if mp_url:
         st.markdown(
             f"""
@@ -472,7 +441,7 @@ if st.session_state.get("mp_plan"):
         )
         st.caption("Si no se abre, habilitá pop-ups o abrilo desde otra pestaña.")
     else:
-        # Opción B: Embed HTML
+        # -------- Opción B: Embed HTML/JS (si lo tenés) --------
         if MP_EMBED_HTML:
             st.info("Cargando checkout embebido…")
             st.components.v1.html(MP_EMBED_HTML, height=650, scrolling=True)
