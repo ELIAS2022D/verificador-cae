@@ -411,14 +411,14 @@ st.markdown('<div id="planes"></div>', unsafe_allow_html=True)
 st.markdown("<div class='section-title'>Una solución para cada necesidad</div>", unsafe_allow_html=True)
 ct1, ct2, ct3 = st.columns([3, 2.2, 3])
 with ct2:
-    anual = st.toggle("Planes anuales (Ahorrá 25%)", value=False)
+    anual = st.toggle("Planes anuales (Ahorrá 0%)", value=False)
 
 # Planes (manteniendo tu pricing + lógica MP)
 plans = [
-    {"id": "pack_50",  "title": "Starter",    "monthly": 12041, "annual": 9031,  "qty": "50 facturas",   "featured": False},
-    {"id": "pack_150", "title": "Pro",        "monthly": 24423, "annual": 18317, "qty": "150 facturas",  "featured": False},
-    {"id": "pack_300", "title": "Advance",    "monthly": 32987, "annual": 24740, "qty": "300 facturas",  "featured": True},
-    {"id": "pack_500", "title": "Enterprise", "monthly": 40614, "annual": 30460, "qty": "500+ facturas", "featured": False, "enterprise": True},
+    {"id": "pack_100",  "title": "Starter",    "monthly": 10000, "annual": 0,  "qty": "100 facturas",   "featured": False},
+    {"id": "pack_500", "title": "Pro",        "monthly": 45000, "annual": 0, "qty": "500 facturas",  "featured": False},
+    {"id": "pack_1000", "title": "Advance",    "monthly": 80000, "annual": 0, "qty": "1000 facturas",  "featured": True},
+    {"id": "pack_1000+", "title": "Enterprise", "monthly": 0, "annual": 0, "qty": "1000+ facturas", "featured": False, "enterprise": True},
 ]
 
 cols = st.columns(4, gap="large")
