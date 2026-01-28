@@ -50,9 +50,9 @@ st.set_page_config(
 )
 
 # Header con logo + nombre
-col1, col2, col3 = st.columns([1, 2, 1])
+col1, col2 = st.columns([1, 2])
 with col1:
-    st.image("assets/favicon.png", width=800)
+    st.image("assets/favicon.png", width=300)
 with col2:
     st.markdown("## LexaCAE AFIP Validacion en la nube")
     st.caption("## Verificación oficial de CAE contra AFIP (WSCDC)")
