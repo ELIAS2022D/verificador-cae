@@ -313,8 +313,8 @@ with st.sidebar:
 
     nav = st.radio(
         label="",
-        options=["app"], # "Planes"
-        index=1 if st.session_state["nav"] == "Planes" else 0,
+        options=["app"],  # solo app visible
+        index=0,
         key="nav_radio",
         label_visibility="collapsed",
     )
@@ -349,18 +349,8 @@ with st.sidebar:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
-# MAIN: botón volver + HERO + PLANES + CHECKOUT
+# MAIN: HERO + PLANES + CHECKOUT
 # =========================================================
-
-# Botón volver a pantalla inicial (main, por si colapsan sidebar)
-st.markdown(
-    f"""
-<div class="back-wrap">
-  <a class="back-btn" href="{HOME_URL}">🏠 Volver a pantalla inicial</a>
-</div>
-""",
-    unsafe_allow_html=True,
-)
 
 # HERO
 st.markdown("<div class='hero-wrap'>", unsafe_allow_html=True)
