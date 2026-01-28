@@ -55,7 +55,7 @@ with col1:
     st.image("assets/favicon.png", width=600)
 with col2:
     st.markdown("## LexaCAE AFIP – Validación en la nube")
-    st.markdown("## Verificación oficial de CAE contra AFIP (WSCDC)")
+    st.caption("## Verificación oficial de CAE contra AFIP (WSCDC)")
     st.markdown("## Práctico. Seguro. Confiable.")
 
 st.divider()
