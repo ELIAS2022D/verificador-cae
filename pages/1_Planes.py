@@ -313,7 +313,7 @@ with st.sidebar:
 
     nav = st.radio(
         label="",
-        options=["app", "Planes"],
+        options=["app"], # "Planes"
         index=1 if st.session_state["nav"] == "Planes" else 0,
         key="nav_radio",
         label_visibility="collapsed",
@@ -324,12 +324,6 @@ with st.sidebar:
         soft_redirect(APP_URL)
 
     st.markdown("<hr style='border:none;height:1px;background:rgba(15,23,42,.10);margin:14px 0;'>", unsafe_allow_html=True)
-
-    # Botón volver a pantalla inicial (sidebar)
-    if st.button("🏠 Volver a pantalla inicial", use_container_width=True):
-        soft_redirect(HOME_URL)
-
-    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
     # Login Card
     st.markdown("<div class='sidebar-card'>", unsafe_allow_html=True)
