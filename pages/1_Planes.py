@@ -308,8 +308,9 @@ with st.sidebar:
     st.markdown("<div class='sidebar-sub'>Verificación de CAE (AFIP) · WSCDC</div>", unsafe_allow_html=True)
 
     # Navegación
-    if "nav" not in st.session_state:
-        st.session_state["nav"] = "Planes"
+    
+    #if "nav" not in st.session_state:
+    #    st.session_state["nav"] = "Planes"
 
     nav = st.radio(
         label="",
