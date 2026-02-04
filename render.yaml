@@ -1,0 +1,76 @@
+services:
+  - type: web
+    name: verificador-cae-backend-{{CLIENT_ID}}
+    env: docker
+    rootDir: backend
+    plan: starter
+    region: oregon
+    autoDeploy: true
+    disk:
+      name: usage-db-{{CLIENT_ID}}
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      # ====== GLOBAL AFIP ======
+      - key: AFIP_CERT_B64
+        sync: false
+      - key: AFIP_KEY_B64
+        sync: false
+      - key: AFIP_CUIT
+        sync: false
+      - key: AFIP_ENV
+        value: prod
+
+      # ====== APP ======
+      - key: APP_NAME
+        value: "Verificador CAE"
+
+      # ====== SECURITY (PER CLIENT) ======
+      - key: BACKEND_API_KEY
+        sync: false
+      - key: DEMO_ACCESS_TOKEN
+        sync: false
+
+      # ====== EMAIL (GLOBAL) ======
+      - key: EMAIL_PROVIDER
+        value: resend
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SMTP_FROM
+        value: "Verificador CAE <onboarding@resend.dev>"
+
+      # ====== ADMIN (RECOMENDADO PER CLIENT) ======
+      - key: MAXI_CUIT
+        sync: false
+      - key: MAXI_PASSWORD
+        sync: false
+      - key: CLIENT_REPORT_EMAIL
+        sync: false
+
+      # ====== SQLITE DISK ======
+      - key: SQLITE_PATH
+        value: /var/data/usage.db
+
+  - type: web
+    name: verificador-cae-front-{{CLIENT_ID}}
+    env: python
+    rootDir: .
+    plan: starter
+    region: oregon
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      # ====== FRONT (PER CLIENT) ======
+      - key: BASE_URL
+        sync: false
+      - key: BACKEND_API_KEY
+        sync: false
+
+      # ====== FRONT DEFAULTS ======
+      - key: BATCH_SIZE
+        value: "25"
+      - key: MAX_FILES
+        value: "50"
+      - key: LOGIN_CUIT_DEFAULT
+        sync: false
