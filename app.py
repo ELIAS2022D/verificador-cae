@@ -238,6 +238,17 @@ def backend_usage_current(base_url: str, api_key: str, access_token: str):
     return r.json()
 
 
+# ✅ NUEVO: total real (bolsa) desde el backend
+def backend_usage_total(base_url: str, api_key: str, access_token: str):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    r = requests.get(f"{base_url}/usage/total", headers=headers, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Usage total falló ({r.status_code}): {r.text}")
+    return r.json()
+
+
 def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
     """
     Dispara el envío del reporte por email desde el BACKEND.
@@ -331,13 +342,52 @@ st.info(
     "La validación AFIP se realiza del lado servidor utilizando el servicio oficial WSCDC (ComprobanteConstatar)."
 )
 
-# ===================== CONSUMO DEL MES + ENVÍO EMAIL =====================
-st.subheader("Resumen de uso del mes")
+# ===================== PANEL: TOTAL REAL + EMAIL MENSUAL =====================
+st.subheader("Uso del plan (total real)")
 
 plan_used = None
 plan_limit = None
 plan_remaining = None
 plan_blocked = False
+
+try:
+    # ✅ TOTAL REAL (bolsa)
+    usage_total = backend_usage_total(
+        base_url=BASE_URL,
+        api_key=st.session_state.auth["api_key"],
+        access_token=st.session_state.auth["access_token"],
+    )
+    total_files = int(usage_total.get("files_count", 0) or 0)
+    total_requests = int(usage_total.get("requests_count", 0) or 0)
+    total_updated_at = usage_total.get("updated_at", "") or ""
+
+    # Límite del plan (solo para UI; el bloqueo real lo hace el backend)
+    FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
+    plan_used = total_files
+    plan_limit = FRONT_PLAN_LIMIT
+    if plan_limit is not None:
+        plan_remaining = max(0, int(plan_limit) - int(plan_used))
+        plan_blocked = plan_used >= plan_limit
+
+    colm1, colm2, colm3 = st.columns(3)
+    with colm1:
+        st.metric("PDFs consumidos (total)", total_files)
+    with colm2:
+        st.metric("Requests (total)", total_requests)
+    with colm3:
+        st.metric("Actualizado", total_updated_at or "-")
+
+    if plan_limit is not None:
+        st.caption(f"Plan: **{plan_used} / {plan_limit}** PDFs usados · Restantes: **{plan_remaining}**")
+        if plan_blocked:
+            st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
+            st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
+
+except Exception:
+    st.warning("No pudimos obtener el uso TOTAL en este momento. Probá nuevamente en unos segundos.")
+
+# ✅ Mantengo tu sección de email mensual (sin tocar lógica)
+st.subheader("Resumen de uso del mes (para email)")
 
 try:
     usage = backend_usage_current(
@@ -349,30 +399,13 @@ try:
     files_count = int(usage.get("files_count", 0) or 0)
     requests_count = int(usage.get("requests_count", 0) or 0)
 
-    # El backend tiene el límite por ENV (PLAN_LIMIT). Acá lo leemos desde ENV del front solo para mostrar.
-    # Si no lo seteás en el front, igual el bloqueo real lo hace el backend.
-    FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
-
-    plan_used = files_count
-    plan_limit = FRONT_PLAN_LIMIT
-    if plan_limit is not None:
-        plan_remaining = max(0, int(plan_limit) - int(plan_used))
-        plan_blocked = plan_used >= plan_limit
-
     colm1, colm2, colm3 = st.columns(3)
     with colm1:
-        st.metric("PDFs procesados", files_count)
+        st.metric("PDFs procesados (mes)", files_count)
     with colm2:
-        st.metric("Solicitudes realizadas", requests_count)
+        st.metric("Solicitudes (mes)", requests_count)
     with colm3:
         st.metric("Mes", ym or "-")
-
-    # ✅ Barra/estado del plan (si el front conoce PLAN_LIMIT)
-    if plan_limit is not None:
-        st.caption(f"Plan: **{plan_used} / {plan_limit}** PDFs usados · Restantes: **{plan_remaining}**")
-        if plan_blocked:
-            st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
-            st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
 
     cbtn1, cbtn2 = st.columns([1, 3])
     with cbtn1:
@@ -388,7 +421,7 @@ try:
                 st.error(str(e))
 
 except Exception:
-    st.warning("No pudimos obtener el resumen de uso en este momento. Probá nuevamente en unos segundos.")
+    st.warning("No pudimos obtener el resumen mensual en este momento. Probá nuevamente en unos segundos.")
 
 st.divider()
 

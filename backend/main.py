@@ -110,6 +110,7 @@ def _ensure_sqlite_dir():
 def _sqlite_init():
     _ensure_sqlite_dir()
     with sqlite3.connect(SQLITE_PATH) as con:
+        # mensual (lo mantenemos para reportes/email)
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_monthly (
@@ -120,6 +121,30 @@ def _sqlite_init():
             );
             """
         )
+
+        # ✅ total (bolsa real, NO se resetea por mes)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_total (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                files_count INTEGER NOT NULL DEFAULT 0,
+                requests_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+        # asegurar fila única id=1
+        now_iso = datetime.now(timezone.utc).isoformat()
+        con.execute(
+            """
+            INSERT INTO usage_total (id, files_count, requests_count, updated_at)
+            VALUES (1, 0, 0, ?)
+            ON CONFLICT(id) DO NOTHING;
+            """,
+            (now_iso,),
+        )
+
         con.commit()
 
 
@@ -154,6 +179,34 @@ def _sqlite_get(year_month: str) -> Dict[str, Any]:
     return {"year_month": row[0], "files_count": int(row[1]), "requests_count": int(row[2]), "updated_at": row[3]}
 
 
+def _sqlite_total_add(files_delta: int, requests_delta: int):
+    _ensure_sqlite_dir()
+    _sqlite_init()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(SQLITE_PATH) as con:
+        con.execute(
+            """
+            UPDATE usage_total
+               SET files_count = files_count + ?,
+                   requests_count = requests_count + ?,
+                   updated_at = ?
+             WHERE id = 1;
+            """,
+            (int(files_delta), int(requests_delta), now_iso),
+        )
+        con.commit()
+
+
+def _sqlite_total_get() -> Dict[str, Any]:
+    _sqlite_init()
+    with sqlite3.connect(SQLITE_PATH) as con:
+        cur = con.execute("SELECT files_count, requests_count, updated_at FROM usage_total WHERE id = 1")
+        row = cur.fetchone()
+    if not row:
+        return {"files_count": 0, "requests_count": 0, "updated_at": None}
+    return {"files_count": int(row[0]), "requests_count": int(row[1]), "updated_at": row[2]}
+
+
 def usage_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]:
     ym = _year_month_utc()
     with _DB_LOCK:
@@ -167,11 +220,29 @@ def usage_current() -> Dict[str, Any]:
         return _sqlite_get(ym)
 
 
+def usage_total_increment(files_delta: int, requests_delta: int = 1) -> Dict[str, Any]:
+    with _DB_LOCK:
+        _sqlite_total_add(files_delta, requests_delta)
+        return _sqlite_total_get()
+
+
+def usage_total_current() -> Dict[str, Any]:
+    with _DB_LOCK:
+        return _sqlite_total_get()
+
+
 @app.get("/usage/current")
 def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
     return usage_current()
+
+
+@app.get("/usage/total")
+def usage_total_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+    return usage_total_current()
 
 
 # ============================================================
@@ -183,9 +254,9 @@ PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100"))  # ej: 100 / 500 / 1000 / ...
 def check_plan_limit_or_raise(files_to_add: int):
     """
     Bloquea validaciones cuando se alcanza el límite del plan.
-    El control es en backend (seguridad real).
+    ✅ Control real en backend contra CONTADOR TOTAL (bolsa), no mensual.
     """
-    usage = usage_current()
+    usage = usage_total_current()
     used = int(usage.get("files_count", 0))
     limit = int(PLAN_LIMIT)
 
@@ -281,7 +352,7 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
 def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
-    u = usage_current()
+    u = usage_current()  # ✅ email sigue siendo mensual (tu lógica original)
     try:
         return send_usage_report_email(u)
     except Exception as e:
@@ -902,7 +973,12 @@ async def verify(
     # ============================================================
     check_plan_limit_or_raise(files_to_add=len(files))
 
-    # contador: suma por request + cantidad de archivos
+    # contador TOTAL (bolsa real) + mensual (solo reportes)
+    try:
+        usage_total_increment(files_delta=len(files), requests_delta=1)
+    except Exception:
+        pass
+
     try:
         usage_increment(files_delta=len(files), requests_delta=1)
     except Exception:
