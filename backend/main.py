@@ -175,6 +175,33 @@ def usage_current_endpoint(x_api_key: str = Header(default=""), authorization: s
 
 
 # ============================================================
+# PLAN LIMIT (se configura por ENV en el backend)
+# ============================================================
+PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100"))  # ej: 100 / 500 / 1000 / ...
+
+
+def check_plan_limit_or_raise(files_to_add: int):
+    """
+    Bloquea validaciones cuando se alcanza el límite del plan.
+    El control es en backend (seguridad real).
+    """
+    usage = usage_current()
+    used = int(usage.get("files_count", 0))
+    limit = int(PLAN_LIMIT)
+
+    if used + int(files_to_add) > limit:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PLAN_LIMIT_REACHED",
+                "message": "Ha alcanzado el límite de su plan. Renueve para continuar.",
+                "used": used,
+                "limit": limit,
+            },
+        )
+
+
+# ============================================================
 # EMAIL REPORT (Resend, alineado a tus ENV)
 # ============================================================
 # ENV:
@@ -869,6 +896,11 @@ async def verify(
     check_api_key(x_api_key)
     check_bearer(authorization)
     require_afip_env()
+
+    # ============================================================
+    # PLAN LIMIT CHECK (ANTES DE PROCESAR / CONTAR)
+    # ============================================================
+    check_plan_limit_or_raise(files_to_add=len(files))
 
     # contador: suma por request + cantidad de archivos
     try:

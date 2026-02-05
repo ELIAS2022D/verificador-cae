@@ -75,6 +75,10 @@ LOGIN_CUIT_DEFAULT = os.getenv("LOGIN_CUIT_DEFAULT", "").strip()
 MAX_FILES_RAW = os.getenv("MAX_FILES", None)
 BATCH_SIZE_RAW = os.getenv("BATCH_SIZE", "50")
 
+# (Opcional) WhatsApp para renovación (si no lo seteás, usa el tuyo por defecto)
+RENEW_WHATSAPP = (os.getenv("RENEW_WHATSAPP", "5491131433906") or "").strip()
+RENEW_TEXT = (os.getenv("RENEW_TEXT", "Hola! Quiero renovar mi plan de LexaCAE. ¿Me ayudan?") or "").strip()
+
 
 def _parse_int_or_none(x):
     try:
@@ -205,8 +209,22 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
         files=files,
         timeout=timeout_s,
     )
+    # 🔥 Si el backend bloquea por plan, devolvemos un error más amigable
     if r.status_code != 200:
+        # Intentar parsear JSON con code PLAN_LIMIT_REACHED
+        try:
+            j = r.json()
+            detail = j.get("detail", j)
+            if isinstance(detail, dict) and detail.get("code") == "PLAN_LIMIT_REACHED":
+                used = detail.get("used")
+                limit = detail.get("limit")
+                msg = detail.get("message") or "Ha alcanzado el límite de su plan."
+                raise RuntimeError(f"{msg} (Usadas: {used} / Límite: {limit})")
+        except Exception:
+            pass
+
         raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
+
     return r.json()
 
 
@@ -240,6 +258,15 @@ def chunk_list(items, size: int):
     if size <= 0:
         return [items]
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _wa_renew_url() -> str:
+    import urllib.parse
+    phone = re.sub(r"\D+", "", RENEW_WHATSAPP or "")
+    if not phone:
+        phone = "5491131433906"
+    txt = urllib.parse.quote(RENEW_TEXT or "")
+    return f"https://wa.me/{phone}?text={txt}"
 
 
 # ===================== SIDEBAR: LOGIN =====================
@@ -307,6 +334,11 @@ st.info(
 # ===================== CONSUMO DEL MES + ENVÍO EMAIL =====================
 st.subheader("Resumen de uso del mes")
 
+plan_used = None
+plan_limit = None
+plan_remaining = None
+plan_blocked = False
+
 try:
     usage = backend_usage_current(
         base_url=BASE_URL,
@@ -317,6 +349,16 @@ try:
     files_count = int(usage.get("files_count", 0) or 0)
     requests_count = int(usage.get("requests_count", 0) or 0)
 
+    # El backend tiene el límite por ENV (PLAN_LIMIT). Acá lo leemos desde ENV del front solo para mostrar.
+    # Si no lo seteás en el front, igual el bloqueo real lo hace el backend.
+    FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
+
+    plan_used = files_count
+    plan_limit = FRONT_PLAN_LIMIT
+    if plan_limit is not None:
+        plan_remaining = max(0, int(plan_limit) - int(plan_used))
+        plan_blocked = plan_used >= plan_limit
+
     colm1, colm2, colm3 = st.columns(3)
     with colm1:
         st.metric("PDFs procesados", files_count)
@@ -324,6 +366,13 @@ try:
         st.metric("Solicitudes realizadas", requests_count)
     with colm3:
         st.metric("Mes", ym or "-")
+
+    # ✅ Barra/estado del plan (si el front conoce PLAN_LIMIT)
+    if plan_limit is not None:
+        st.caption(f"Plan: **{plan_used} / {plan_limit}** PDFs usados · Restantes: **{plan_remaining}**")
+        if plan_blocked:
+            st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
+            st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
 
     cbtn1, cbtn2 = st.columns([1, 3])
     with cbtn1:
@@ -440,7 +489,10 @@ st.subheader("Validación contra AFIP")
 st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
 st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDFs (ajustable).")
 
-if st.button("Validar ahora", use_container_width=True):
+# ✅ Bloqueo visual: si el front conoce el plan y está vencido, deshabilita el botón.
+button_disabled = bool(plan_blocked)
+
+if st.button("Validar ahora", use_container_width=True, disabled=button_disabled):
     if not pdf_files:
         st.error("Primero cargá PDFs o un ZIP con PDFs.")
         st.stop()
@@ -471,6 +523,9 @@ if st.button("Validar ahora", use_container_width=True):
             st.warning("No pudimos obtener resultados del servidor. Probá de nuevo en unos segundos.")
     except Exception as e:
         st.error(str(e))
+        # Si el error fue plan límite, mostrar CTA directo
+        if "límite de su plan" in str(e).lower() or "plan_limit_reached" in str(e).lower():
+            st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
 
 # ===================== EXPORTS (CSV + XLSX) =====================
 if not df.empty:
