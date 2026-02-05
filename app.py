@@ -350,6 +350,15 @@ plan_limit = None
 plan_remaining = None
 plan_blocked = False
 
+def _fmt_yyyy_mm_from_iso(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return ""
+    # ISO típico: 2026-02-05T20:07:49.025060+00:00  ->  2026-02
+    if len(s) >= 7 and s[4] == "-":
+        return s[:7]
+    return s
+
 try:
     # ✅ TOTAL REAL (bolsa)
     usage_total = backend_usage_total(
@@ -359,7 +368,9 @@ try:
     )
     total_files = int(usage_total.get("files_count", 0) or 0)
     total_requests = int(usage_total.get("requests_count", 0) or 0)
-    total_updated_at = usage_total.get("updated_at", "") or ""
+
+    total_updated_at_raw = usage_total.get("updated_at", "") or ""
+    total_updated_at = _fmt_yyyy_mm_from_iso(total_updated_at_raw)
 
     # Límite del plan (solo para UI; el bloqueo real lo hace el backend)
     FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
@@ -375,7 +386,8 @@ try:
     with colm2:
         st.metric("Requests (total)", total_requests)
     with colm3:
-        st.metric("Actualizado", total_updated_at or "-")
+        # ✅ queda igual que el mensual (YYYY-MM)
+        st.metric("Mes", total_updated_at or "-")
 
     if plan_limit is not None:
         st.caption(f"Plan: **{plan_used} / {plan_limit}** PDFs usados · Restantes: **{plan_remaining}**")
