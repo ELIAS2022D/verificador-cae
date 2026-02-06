@@ -327,7 +327,7 @@ if not st.session_state.auth["logged"]:
     with c1:
         st.markdown("**1) Ingresá**\n\nAccedé con tu CUIT y contraseña.")
     with c2:
-        st.markdown("**2) Subí PDF/ZIP**\n\nCargá tus facturas en PDF")
+        st.markdown("**2) Subí PDF/ZIP**\n\nCargá tus facturas en PDF. Si tenés muchas, podes comprimirlas en un ZIP.")
     with c3:
         st.markdown("**3) Vista previa**\n\nDetectamos CAE y vencimiento desde el PDF.")
     with c4:
