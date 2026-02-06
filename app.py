@@ -54,8 +54,8 @@ col1, col2 = st.columns([1, 2])
 with col1:
     st.image("assets/favicon.png", width=600)
 with col2:
-    st.markdown("## LexaCAE AFIP – Validación en la nube")
-    st.caption("## Verificación oficial de CAE contra AFIP")
+    st.markdown("## LexaCAE AFIP – Validación en la nube.")
+    st.caption("## Verificación oficial de CAE contra AFIP.")
     st.markdown("## Práctico. Seguro. Confiable.")
 
 st.divider()
@@ -382,7 +382,7 @@ try:
 
     colm1, colm2, colm3 = st.columns(3)
     with colm1:
-        st.metric("PDFs consumidos (total)", total_files)
+        st.metric("PDF consumidos (total)", total_files)
     with colm2:
         st.metric("Requests (total)", total_requests)
     with colm3:
@@ -390,7 +390,7 @@ try:
         st.metric("Mes", total_updated_at or "-")
 
     if plan_limit is not None:
-        st.caption(f"Plan: **{plan_used} / {plan_limit}** PDFs usados · Restantes: **{plan_remaining}**")
+        st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
         if plan_blocked:
             st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
             st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
@@ -413,7 +413,7 @@ try:
 
     colm1, colm2, colm3 = st.columns(3)
     with colm1:
-        st.metric("PDFs procesados (mes)", files_count)
+        st.metric("PDF procesados (mes)", files_count)
     with colm2:
         st.metric("Solicitudes (mes)", requests_count)
     with colm3:
@@ -443,17 +443,17 @@ st.subheader("Carga de facturas")
 help_text = "sin límite" if MAX_FILES is None else f"hasta {MAX_FILES}"
 mode = st.radio(
     "Modo de carga",
-    [f"PDFs ({help_text})", f"ZIP ({help_text})"],
+    [f"PDF ({help_text})", f"ZIP ({help_text})"],
     horizontal=True,
 )
 
 pdf_files = []
 
-if mode.startswith("PDFs"):
+if mode.startswith("PDF"):
     uploaded = st.file_uploader("Subí tus facturas en PDF", type=["pdf"], accept_multiple_files=True)
     if uploaded:
         if MAX_FILES is not None and len(uploaded) > MAX_FILES:
-            st.warning(f"Subiste {len(uploaded)} PDFs. Por configuración se procesarán solo los primeros {MAX_FILES}.")
+            st.warning(f"Subiste {len(uploaded)} PDF. Por configuración se procesarán solo los primeros {MAX_FILES}.")
             uploaded = uploaded[:MAX_FILES]
         pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
 else:
@@ -463,13 +463,13 @@ else:
             with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
                 names = [n for n in z.namelist() if n.lower().endswith(".pdf") and not n.endswith("/")]
                 if not names:
-                    st.error("No encontramos PDFs dentro del ZIP.")
+                    st.error("No encontramos PDF dentro del ZIP.")
                 else:
                     if MAX_FILES is not None and len(names) > MAX_FILES:
-                        st.warning(f"El ZIP tiene {len(names)} PDFs. Por configuración se procesarán solo {MAX_FILES}.")
+                        st.warning(f"El ZIP tiene {len(names)} PDF. Por configuración se procesarán solo {MAX_FILES}.")
                         names = names[:MAX_FILES]
                     pdf_files = [{"name": n.split("/")[-1], "bytes": z.read(n)} for n in names]
-                    st.success(f"PDFs detectados: {len(pdf_files)}")
+                    st.success(f"PDF detectados: {len(pdf_files)}")
         except zipfile.BadZipFile:
             st.error("ZIP inválido o dañado.")
 
@@ -526,20 +526,20 @@ if pdf_files:
 
 df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
 
-st.subheader("Vista previa PDFs cargados")
+st.subheader("Vista previa PDF cargados")
 st.dataframe(df, use_container_width=True)
 
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
 st.subheader("Validación contra AFIP")
 st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
-st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDFs (ajustable).")
+st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDF (ajustable).")
 
 # ✅ Bloqueo visual: si el front conoce el plan y está vencido, deshabilita el botón.
 button_disabled = bool(plan_blocked)
 
 if st.button("Validar ahora", use_container_width=True, disabled=button_disabled):
     if not pdf_files:
-        st.error("Primero cargá PDFs o un ZIP")
+        st.error("Primero cargá PDF o un ZIP")
         st.stop()
 
     try:
