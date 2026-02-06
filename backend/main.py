@@ -28,8 +28,13 @@ from urllib3.poolmanager import PoolManager
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
-# ===== Email (Resend) =====
+# ===== Email (Resend + Brevo) =====
 import resend
+
+# ✅ NUEVO: SMTP (para brevo_smtp)
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 
 # ============================================================
@@ -273,17 +278,27 @@ def check_plan_limit_or_raise(files_to_add: int):
 
 
 # ============================================================
-# EMAIL REPORT (Resend, alineado a tus ENV)
+# EMAIL REPORT (Resend + Brevo)  ✅ ACTUALIZADO
 # ============================================================
 # ENV:
-# - EMAIL_PROVIDER=resend
+# - EMAIL_PROVIDER=resend | brevo | brevo_smtp
 # - RESEND_API_KEY=...
-# - SMTP_FROM="Verificador CAE <onboarding@resend.dev>"
-# - CLIENT_REPORT_EMAIL=derricoelias@gmail.com  (puede ser CSV: a@a.com,b@b.com)
+# - BREVO_API_KEY=...              (solo si EMAIL_PROVIDER=brevo)
+# - SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS (solo si EMAIL_PROVIDER=brevo_smtp)
+# - SMTP_FROM="LexaCAE <no-reply@lexacae.com.ar>"
+# - CLIENT_REPORT_EMAIL=... (CSV: a@a.com,b@b.com)
 EMAIL_PROVIDER = (os.getenv("EMAIL_PROVIDER", "resend") or "").strip().lower()
+
 RESEND_API_KEY = (os.getenv("RESEND_API_KEY", "") or "").strip()
+BREVO_API_KEY = (os.getenv("BREVO_API_KEY", "") or "").strip()
+
 SMTP_FROM = (os.getenv("SMTP_FROM", "") or "").strip()
 CLIENT_REPORT_EMAIL = (os.getenv("CLIENT_REPORT_EMAIL", "") or "").strip()
+
+SMTP_HOST = (os.getenv("SMTP_HOST", "") or "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
+SMTP_USER = (os.getenv("SMTP_USER", "") or "").strip()
+SMTP_PASS = (os.getenv("SMTP_PASS", "") or "").strip()
 
 
 def _parse_emails_csv(s: str) -> List[str]:
@@ -292,20 +307,30 @@ def _parse_emails_csv(s: str) -> List[str]:
     return [e.strip() for e in s.split(",") if e.strip()]
 
 
-def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
-    if EMAIL_PROVIDER != "resend":
-        raise RuntimeError(f"EMAIL_PROVIDER no soportado: {EMAIL_PROVIDER}. Usá 'resend'.")
+def _parse_from_name_email(from_value: str) -> Tuple[str, str]:
+    """
+    Soporta:
+      - "Nombre <email@dominio>"
+      - "email@dominio"
+    """
+    v = (from_value or "").strip()
+    m = re.match(r'^\s*(?:"?([^"]*)"?\s*)?<([^>]+)>\s*$', v)
+    if m:
+        name = (m.group(1) or "").strip() or "LexaCAE"
+        email = (m.group(2) or "").strip()
+        return name, email
+    return "LexaCAE", v
 
-    if not RESEND_API_KEY:
-        raise RuntimeError("Falta RESEND_API_KEY en variables de entorno.")
+
+def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
+    provider = (EMAIL_PROVIDER or "").strip().lower()
+
     if not SMTP_FROM:
-        raise RuntimeError("Falta SMTP_FROM en variables de entorno (From verificado/permitido por Resend).")
+        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
 
     to_list = _parse_emails_csv(CLIENT_REPORT_EMAIL)
     if not to_list:
         raise RuntimeError("Falta CLIENT_REPORT_EMAIL (destinatario) en variables de entorno.")
-
-    resend.api_key = RESEND_API_KEY
 
     ym = usage.get("year_month") or "-"
     files_count = int(usage.get("files_count", 0) or 0)
@@ -336,16 +361,85 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
         "</div>"
     )
 
-    params = {
-        "from": SMTP_FROM,
-        "to": to_list,
-        "subject": subject,
-        "text": text,
-        "html": html,
-    }
+    # ---------------------------
+    # Provider: RESEND (como venías)
+    # ---------------------------
+    if provider == "resend":
+        if not RESEND_API_KEY:
+            raise RuntimeError("Falta RESEND_API_KEY en variables de entorno.")
 
-    resp = resend.Emails.send(params)
-    return {"ok": True, "provider": "resend", "to": to_list, "resend": resp}
+        resend.api_key = RESEND_API_KEY
+        params = {
+            "from": SMTP_FROM,
+            "to": to_list,
+            "subject": subject,
+            "text": text,
+            "html": html,
+        }
+        resp = resend.Emails.send(params)
+        return {"ok": True, "provider": "resend", "to": to_list, "resend": resp}
+
+    # ---------------------------
+    # Provider: BREVO API (v3)
+    # POST https://api.brevo.com/v3/smtp/email
+    # ---------------------------
+    if provider == "brevo":
+        if not BREVO_API_KEY:
+            raise RuntimeError("Falta BREVO_API_KEY en variables de entorno.")
+
+        from_name, from_email = _parse_from_name_email(SMTP_FROM)
+        if not from_email or "@" not in from_email:
+            raise RuntimeError("SMTP_FROM inválido. Formato esperado: 'Nombre <email@dominio>' o 'email@dominio'.")
+
+        payload = {
+            "sender": {"name": from_name, "email": from_email},
+            "to": [{"email": e} for e in to_list],
+            "subject": subject,
+            "htmlContent": html,
+            "textContent": text,
+        }
+
+        r = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
+            json=payload,
+            timeout=25,
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Brevo API error {r.status_code}: {r.text[:800]}")
+
+        return {"ok": True, "provider": "brevo", "to": to_list, "brevo": r.json()}
+
+    # ---------------------------
+    # Provider: BREVO SMTP
+    # ---------------------------
+    if provider == "brevo_smtp":
+        if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
+            raise RuntimeError("Faltan SMTP_HOST/SMTP_USER/SMTP_PASS para brevo_smtp.")
+        if not SMTP_PORT:
+            raise RuntimeError("Falta SMTP_PORT para brevo_smtp.")
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM
+        msg["To"] = ", ".join(to_list)
+
+        msg.attach(MIMEText(text, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+
+        # sendmail espera dirección real como envelope-from
+        _, from_email = _parse_from_name_email(SMTP_FROM)
+        envelope_from = from_email if from_email and "@" in from_email else SMTP_FROM
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(envelope_from, to_list, msg.as_string())
+
+        return {"ok": True, "provider": "brevo_smtp", "to": to_list}
+
+    raise RuntimeError(f"EMAIL_PROVIDER no soportado: {provider}. Usá 'resend', 'brevo' o 'brevo_smtp'.")
 
 
 @app.post("/usage/email")
@@ -513,7 +607,7 @@ def find_first(patterns, text: str) -> Optional[str]:
     # fallback: ventana alrededor de "cae"
     idx = text.lower().find("cae")
     if idx != -1:
-        window = text[idx : idx + 250]
+        window = text[idx: idx + 250]
         m2 = re.search(r"(\d{14})", window)
         if m2:
             return m2.group(1)
