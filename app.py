@@ -55,7 +55,7 @@ with col1:
     st.image("assets/favicon.png", width=600)
 with col2:
     st.markdown("## LexaCAE AFIP – Validación en la nube")
-    st.caption("## Verificación oficial de CAE contra AFIP (WSCDC)")
+    st.caption("## Verificación oficial de CAE contra AFIP")
     st.markdown("## Práctico. Seguro. Confiable.")
 
 st.divider()
@@ -327,7 +327,7 @@ if not st.session_state.auth["logged"]:
     with c1:
         st.markdown("**1) Ingresá**\n\nAccedé con tu CUIT y contraseña.")
     with c2:
-        st.markdown("**2) Subí PDFs/ZIP**\n\nCargá tus facturas en PDF (o un ZIP con PDFs).")
+        st.markdown("**2) Subí PDF/ZIP**\n\nCargá tus facturas en PDF")
     with c3:
         st.markdown("**3) Vista previa**\n\nDetectamos CAE y vencimiento desde el PDF.")
     with c4:
@@ -343,7 +343,7 @@ st.info(
 )
 
 # ===================== PANEL: TOTAL REAL + EMAIL MENSUAL =====================
-st.subheader("Uso del plan (total real)")
+st.subheader("Uso del plan")
 
 plan_used = None
 plan_limit = None
@@ -399,7 +399,7 @@ except Exception:
     st.warning("No pudimos obtener el uso TOTAL en este momento. Probá nuevamente en unos segundos.")
 
 # ✅ Mantengo tu sección de email mensual (sin tocar lógica)
-st.subheader("Resumen de uso del mes (para email)")
+st.subheader("Resumen de uso del mes")
 
 try:
     usage = backend_usage_current(
@@ -443,7 +443,7 @@ st.subheader("Carga de facturas")
 help_text = "sin límite" if MAX_FILES is None else f"hasta {MAX_FILES}"
 mode = st.radio(
     "Modo de carga",
-    [f"PDFs ({help_text})", f"ZIP (contiene PDFs) ({help_text})"],
+    [f"PDFs ({help_text})", f"ZIP ({help_text})"],
     horizontal=True,
 )
 
@@ -457,7 +457,7 @@ if mode.startswith("PDFs"):
             uploaded = uploaded[:MAX_FILES]
         pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
 else:
-    zip_up = st.file_uploader("Subí 1 archivo ZIP (con PDFs)", type=["zip"])
+    zip_up = st.file_uploader("Subí 1 archivo ZIP", type=["zip"])
     if zip_up:
         try:
             with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
@@ -526,7 +526,7 @@ if pdf_files:
 
 df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
 
-st.subheader("Vista previa (datos detectados en el PDF)")
+st.subheader("Vista previa PDFs cargados")
 st.dataframe(df, use_container_width=True)
 
 # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
@@ -539,7 +539,7 @@ button_disabled = bool(plan_blocked)
 
 if st.button("Validar ahora", use_container_width=True, disabled=button_disabled):
     if not pdf_files:
-        st.error("Primero cargá PDFs o un ZIP con PDFs.")
+        st.error("Primero cargá PDFs o un ZIP")
         st.stop()
 
     try:
