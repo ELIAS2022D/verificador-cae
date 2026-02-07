@@ -54,7 +54,7 @@ col1, col2 = st.columns([1, 2])
 with col1:
     st.image("assets/favicon.png", width=600)
 with col2:
-    st.markdown("## AFIP – Validación en la nube.")
+    st.markdown("## Validación en la nube.")
     st.caption("## Verificación oficial de CAE contra AFIP.")
     st.markdown("## Práctico. Seguro. Confiable.")
 
