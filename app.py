@@ -79,6 +79,102 @@ BATCH_SIZE_RAW = os.getenv("BATCH_SIZE", "50")
 RENEW_WHATSAPP = (os.getenv("RENEW_WHATSAPP", "5491131433906") or "").strip()
 RENEW_TEXT = (os.getenv("RENEW_TEXT", "Hola! Quiero renovar mi plan de LexaCAE. ¿Me ayudan?") or "").strip()
 
+# ===================== WHATSAPP FLOTANTE (GLOBAL) =====================
+def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: str = "Soporte técnico"):
+    """
+    Botón flotante WhatsApp (fijo abajo a la derecha) + mini tooltip.
+    Funciona en Streamlit porque inyecta HTML/CSS en el DOM del parent.
+    """
+    import urllib.parse
+
+    phone_digits = re.sub(r"\D+", "", phone or "")
+    if not phone_digits:
+        phone_digits = "5491131433906"
+
+    msg = urllib.parse.quote((default_text or "").strip())
+    wa_url = f"https://wa.me/{phone_digits}?text={msg}"
+
+    bubble_text_safe = (bubble_text or "Soporte técnico").replace("<", "&lt;").replace(">", "&gt;")
+
+    st.markdown(
+        f"""
+        <style>
+          .wa-float {{
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            z-index: 999999;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+          }}
+
+          .wa-bubble {{
+            background: rgba(15, 23, 42, 0.92);
+            color: #fff;
+            padding: 10px 12px;
+            border-radius: 999px;
+            font-size: 13px;
+            line-height: 1;
+            box-shadow: 0 12px 28px rgba(0,0,0,.25);
+            border: 1px solid rgba(255,255,255,.12);
+            white-space: nowrap;
+          }}
+
+          .wa-btn {{
+            width: 56px;
+            height: 56px;
+            border-radius: 999px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none !important;
+            background: #25D366;
+            box-shadow: 0 14px 32px rgba(0,0,0,.25);
+            border: 1px solid rgba(255,255,255,.25);
+            transition: transform .15s ease, box-shadow .15s ease;
+          }}
+          .wa-btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 18px 36px rgba(0,0,0,.32);
+          }}
+
+          .wa-icon {{
+            width: 28px;
+            height: 28px;
+            fill: white;
+          }}
+
+          @media (max-width: 720px) {{
+            .wa-bubble {{ display: none; }}
+            .wa-btn {{ width: 54px; height: 54px; }}
+          }}
+        </style>
+
+        <div class="wa-float">
+          <div class="wa-bubble">{bubble_text_safe}</div>
+          <a class="wa-btn" href="{wa_url}" target="_blank" rel="noopener noreferrer" aria-label="WhatsApp Soporte">
+            <svg class="wa-icon" viewBox="0 0 32 32" aria-hidden="true">
+              <path d="M19.11 17.44c-.27-.13-1.6-.79-1.85-.88-.25-.09-.43-.13-.61.13-.18.27-.7.88-.86 1.06-.16.18-.32.2-.59.07-.27-.13-1.14-.42-2.17-1.33-.8-.71-1.34-1.58-1.5-1.85-.16-.27-.02-.42.12-.55.12-.12.27-.32.4-.48.13-.16.18-.27.27-.45.09-.18.04-.34-.02-.48-.07-.13-.61-1.47-.84-2.01-.22-.53-.45-.46-.61-.47h-.52c-.18 0-.48.07-.73.34-.25.27-.95.93-.95 2.27 0 1.34.98 2.63 1.12 2.81.13.18 1.93 2.95 4.68 4.13.66.28 1.18.45 1.58.58.66.21 1.26.18 1.74.11.53-.08 1.6-.65 1.83-1.28.23-.63.23-1.17.16-1.28-.07-.11-.25-.18-.52-.32z"/>
+              <path d="M26.67 5.33A13.3 13.3 0 0 0 16 1.33C8.82 1.33 3 7.15 3 14.33c0 2.3.6 4.56 1.74 6.55L3 30.67l10-1.63A13.2 13.2 0 0 0 16 27.33c7.18 0 13-5.82 13-13 0-3.47-1.35-6.73-3.33-9zM16 25.33c-2.03 0-4.01-.55-5.74-1.6l-.41-.24-5.94.97.99-5.79-.26-.42A10.9 10.9 0 0 1 5 14.33C5 8.25 9.92 3.33 16 3.33c2.91 0 5.65 1.13 7.71 3.2A10.84 10.84 0 0 1 27 14.33c0 6.08-4.92 11-11 11z"/>
+            </svg>
+          </a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ✅ WhatsApp soporte (configurable por ENV; por defecto usa el mismo que renovación)
+SUPPORT_WHATSAPP = (os.getenv("SUPPORT_WHATSAPP", RENEW_WHATSAPP) or "5491131433906").strip()
+SUPPORT_TEXT = (os.getenv(
+    "SUPPORT_TEXT",
+    "Hola! Necesito soporte con LexaCAE. Mi CUIT es: ____ . Detalle/Problema: ____ ."
+) or "").strip()
+SUPPORT_BUBBLE = (os.getenv("SUPPORT_BUBBLE", "Soporte técnico") or "Soporte técnico").strip()
+
+inject_whatsapp_floating_button(SUPPORT_WHATSAPP, SUPPORT_TEXT, SUPPORT_BUBBLE)
+
 
 def _parse_int_or_none(x):
     try:
