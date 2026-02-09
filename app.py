@@ -433,10 +433,7 @@ if not st.session_state.auth["logged"]:
     st.stop()
 
 # ===================== INFO GENERAL =====================
-st.info(
-    "Flujo: detectamos CAE/Vto desde el PDF localmente. "
-    "La validación AFIP se realiza del lado servidor utilizando el servicio oficial WSCDC (ComprobanteConstatar)."
-)
+st.info("Detectamos CAE y vencimiento desde el PDF y luego validamos contra AFIP utilizando el servicio oficial WSCDC (ComprobanteConstatar).")
 
 # ===================== PANEL: TOTAL REAL + EMAIL MENSUAL =====================
 st.subheader("Uso del plan")
