@@ -26,7 +26,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 
 from fastapi import FastAPI, Header, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ===== Email (Resend + Brevo) =====
 import resend
@@ -134,6 +134,20 @@ def _sqlite_init():
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 files_count INTEGER NOT NULL DEFAULT 0,
                 requests_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+        # ✅ NUEVO: tenants para WSFE (multi-cliente)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS afip_tenants (
+                cuit TEXT PRIMARY KEY,
+                cert_b64 TEXT NOT NULL,
+                key_b64 TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
             """
@@ -768,10 +782,14 @@ def _sanitize_receptor(doc_tipo: Optional[int], doc_nro: Optional[str]) -> Tuple
 
 
 # ============================================================
-# AFIP CONFIG (WSAA + WSCDC)
+# AFIP CONFIG (WSAA + WSCDC + WSFEv1)
 # ============================================================
 AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
+
+# ✅ WSCDC: CUIT consultante (TU CUIT, habilitado en tu cuenta)
 AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
+
+# ✅ Credenciales "base" (TU CERT/KEY) para WSCDC (servicio consultante)
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
 AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
 
@@ -786,6 +804,13 @@ WSCDC_URLS = {
     "homo": "https://wswhomo.afip.gob.ar/WSCDC/service.asmx",
 }
 
+# ✅ WSFEv1 endpoints
+# (si querés, los podés pisar por ENV; si no, quedan estos defaults)
+WSFE_URLS = {
+    "prod": os.getenv("WSFE_URL_PROD", "https://servicios1.afip.gov.ar/wsfev1/service.asmx").strip(),
+    "homo": os.getenv("WSFE_URL_HOMO", "https://wswhomo.afip.gob.ar/wsfev1/service.asmx").strip(),
+}
+
 WSAA_SOAP_ACTION = os.getenv("WSAA_SOAP_ACTION", "loginCms").strip()
 
 # SOAPAction/NS suelen mantenerse con "afip.gob.ar" aunque el HOST sea "afip.gov.ar"
@@ -797,6 +822,10 @@ WSCDC_NS = os.getenv(
     "WSCDC_NS",
     "http://servicios1.afip.gob.ar/wscdc/",
 ).strip()
+
+# WSFEv1 SOAP details
+WSFE_NS = os.getenv("WSFE_NS", "http://ar.gov.afip.dif.FEV1/").strip()
+WSFE_SOAP_ACTION = os.getenv("WSFE_SOAP_ACTION", "").strip()  # opcional; muchas implementaciones no lo requieren
 
 
 def require_afip_env():
@@ -830,13 +859,103 @@ AFIP_SESSION.trust_env = False  # ✅ evita proxies del entorno (MITM / hostname
 AFIP_SESSION.mount("https://wsaa.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wsaahomo.afip.gov.ar", AfipTLSAdapter())
 
-# ✅ FIX: montar host correcto de WSCDC PROD
+# ✅ FIX: montar hosts correctos
 AFIP_SESSION.mount("https://servicios1.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
 
-_TA_CACHE: Dict[str, Any] = {"token": None, "sign": None, "exp_utc": None}
+
+# ============================================================
+# MULTI-TENANT STORE (SQLite)
+# ============================================================
+class TenantUpsertRequest(BaseModel):
+    cuit: str = Field(..., description="CUIT emisor (11 dígitos)")
+    cert_b64: str = Field(..., description="Certificado X509 en base64 (PEM o DER)")
+    key_b64: str = Field(..., description="Clave privada en base64 (PEM o DER)")
+    enabled: bool = True
 
 
+def _norm_cuit(cuit: str) -> str:
+    return re.sub(r"\D+", "", (cuit or "").strip())
+
+
+def tenant_upsert(cuit: str, cert_b64: str, key_b64: str, enabled: bool = True) -> Dict[str, Any]:
+    _sqlite_init()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    c = _norm_cuit(cuit)
+    if not re.fullmatch(r"\d{11}", c):
+        raise HTTPException(status_code=400, detail="CUIT inválido (debe tener 11 dígitos).")
+    if not cert_b64 or not key_b64:
+        raise HTTPException(status_code=400, detail="Faltan cert_b64 y/o key_b64.")
+
+    with sqlite3.connect(SQLITE_PATH) as con:
+        con.execute(
+            """
+            INSERT INTO afip_tenants (cuit, cert_b64, key_b64, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cuit) DO UPDATE SET
+              cert_b64 = excluded.cert_b64,
+              key_b64 = excluded.key_b64,
+              enabled = excluded.enabled,
+              updated_at = excluded.updated_at;
+            """,
+            (c, cert_b64.strip(), key_b64.strip(), 1 if enabled else 0, now_iso, now_iso),
+        )
+        con.commit()
+
+    return {"ok": True, "cuit": c, "enabled": bool(enabled)}
+
+
+def tenant_get(cuit: str) -> Optional[Dict[str, Any]]:
+    _sqlite_init()
+    c = _norm_cuit(cuit)
+    with sqlite3.connect(SQLITE_PATH) as con:
+        cur = con.execute(
+            "SELECT cuit, cert_b64, key_b64, enabled, created_at, updated_at FROM afip_tenants WHERE cuit = ?",
+            (c,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "cuit": row[0],
+        "cert_b64": row[1],
+        "key_b64": row[2],
+        "enabled": bool(int(row[3] or 0)),
+        "created_at": row[4],
+        "updated_at": row[5],
+    }
+
+
+@app.post("/tenants/upsert")
+def tenants_upsert_endpoint(
+    payload: TenantUpsertRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    # admin-only: mismo auth que tu sistema
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+    return tenant_upsert(payload.cuit, payload.cert_b64, payload.key_b64, payload.enabled)
+
+
+@app.get("/tenants/{cuit}")
+def tenants_get_endpoint(
+    cuit: str,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+    t = tenant_get(cuit)
+    if not t:
+        raise HTTPException(status_code=404, detail="Tenant no encontrado.")
+    # no exponemos cert/key por seguridad
+    return {"cuit": t["cuit"], "enabled": t["enabled"], "created_at": t["created_at"], "updated_at": t["updated_at"]}
+
+
+# ============================================================
+# WSAA HELPERS (firma + cache multi-tenant)
+# ============================================================
 def build_tra(service: str) -> str:
     now = datetime.now(timezone.utc)
     gen = now - timedelta(minutes=5)
@@ -929,14 +1048,31 @@ def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> byte
             return f.read()
 
 
-def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
-    now = datetime.now(timezone.utc)
-    if _TA_CACHE["token"] and _TA_CACHE["sign"] and _TA_CACHE["exp_utc"]:
-        if now + timedelta(minutes=2) < _TA_CACHE["exp_utc"]:
-            return {"token": _TA_CACHE["token"], "sign": _TA_CACHE["sign"]}
+# Cache TA: key = (tenant_cuit, service)
+_TA_CACHE_MULTI: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_TA_LOCK = threading.Lock()
 
-    cert_bytes = b64_to_bytes(AFIP_CERT_B64)
-    key_bytes = b64_to_bytes(AFIP_KEY_B64)
+
+def wsaa_login_get_ta_for(
+    service: str,
+    tenant_cuit: str,
+    cert_b64: str,
+    key_b64: str,
+) -> Dict[str, str]:
+    """
+    Devuelve {token, sign} para (tenant_cuit, service), con cache por expiración.
+    """
+    now = datetime.now(timezone.utc)
+    key = (_norm_cuit(tenant_cuit), (service or "").strip().lower())
+
+    with _TA_LOCK:
+        c = _TA_CACHE_MULTI.get(key)
+        if c and c.get("token") and c.get("sign") and c.get("exp_utc"):
+            if now + timedelta(minutes=2) < c["exp_utc"]:
+                return {"token": c["token"], "sign": c["sign"]}
+
+    cert_bytes = b64_to_bytes(cert_b64)
+    key_bytes = b64_to_bytes(key_b64)
     cert_pem, key_pem = normalize_cert_key_to_pem(cert_bytes, key_bytes)
 
     tra_xml = build_tra(service=service)
@@ -976,13 +1112,16 @@ def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
         raise RuntimeError("WSAA: TA incompleto (token/sign/expirationTime).")
 
     exp_utc = datetime.fromisoformat(exp_s.replace("Z", "+00:00")).astimezone(timezone.utc)
-    _TA_CACHE["token"] = token
-    _TA_CACHE["sign"] = sign
-    _TA_CACHE["exp_utc"] = exp_utc
+
+    with _TA_LOCK:
+        _TA_CACHE_MULTI[key] = {"token": token, "sign": sign, "exp_utc": exp_utc}
 
     return {"token": token, "sign": sign}
 
 
+# ============================================================
+# WSCDC (VALIDACIÓN) — usa TU CUIT + TU CERT/KEY
+# ============================================================
 def wscdc_comprobante_constatar(
     cbte_tipo: int,
     pto_vta: int,
@@ -994,7 +1133,8 @@ def wscdc_comprobante_constatar(
     doc_tipo_receptor: Optional[int] = None,
     doc_nro_receptor: Optional[str] = None,
 ) -> Dict[str, Any]:
-    ta = wsaa_login_get_ta(service="wscdc")
+    # ✅ WSCDC se autentica con TU CUIT (consultante) y TU cert/key
+    ta = wsaa_login_get_ta_for(service="wscdc", tenant_cuit=AFIP_CUIT, cert_b64=AFIP_CERT_B64, key_b64=AFIP_KEY_B64)
 
     url = WSCDC_URLS[AFIP_ENV]
     cuit_consulta = AFIP_CUIT
@@ -1050,7 +1190,284 @@ def wscdc_comprobante_constatar(
 
 
 # ============================================================
-# VERIFY ENDPOINT (PROD)
+# WSFEv1 (FACTURACIÓN) — cada cliente emite con su CUIT y su cert/key
+# ============================================================
+class WsfeLastRequest(BaseModel):
+    cuit: str
+    pto_vta: int
+    cbte_tipo: int
+
+
+class AlicIva(BaseModel):
+    id: int
+    base_imp: float
+    importe: float
+
+
+class WsfeCaeRequest(BaseModel):
+    cuit: str
+    pto_vta: int
+    cbte_tipo: int
+    concepto: int = 1  # 1=Productos, 2=Servicios, 3=Productos y Servicios
+    doc_tipo: int = 80  # 80=CUIT, 96=DNI, etc.
+    doc_nro: str
+    cbte_fch: str = Field(..., description="YYYYMMDD")
+
+    imp_total: float
+    imp_tot_conc: float = 0.0
+    imp_neto: float = 0.0
+    imp_op_ex: float = 0.0
+    imp_trib: float = 0.0
+    imp_iva: float = 0.0
+
+    mon_id: str = "PES"
+    mon_ctz: float = 1.0
+
+    iva: List[AlicIva] = Field(default_factory=list)
+
+
+# locks por numeración correlativa (por tenant+pto+tipo)
+_WSFE_LOCKS: Dict[Tuple[str, int, int], threading.Lock] = {}
+_WSFE_LOCKS_GUARD = threading.Lock()
+
+
+def _wsfe_lock_for(cuit: str, pto_vta: int, cbte_tipo: int) -> threading.Lock:
+    key = (_norm_cuit(cuit), int(pto_vta), int(cbte_tipo))
+    with _WSFE_LOCKS_GUARD:
+        if key not in _WSFE_LOCKS:
+            _WSFE_LOCKS[key] = threading.Lock()
+        return _WSFE_LOCKS[key]
+
+
+def _wsfe_headers() -> Dict[str, str]:
+    h = {"Content-Type": "text/xml; charset=utf-8"}
+    if WSFE_SOAP_ACTION:
+        h["SOAPAction"] = WSFE_SOAP_ACTION
+    return h
+
+
+def _wsfe_call(url: str, soap: str, timeout: int = 60) -> str:
+    r = AFIP_SESSION.post(url, data=soap.encode("utf-8"), headers=_wsfe_headers(), timeout=timeout)
+    if r.status_code != 200:
+        raise RuntimeError(f"WSFE HTTP {r.status_code}: {r.text[:2500]}")
+    return r.text
+
+
+def wsfe_comp_ultimo_autorizado(tenant_cuit: str, pto_vta: int, cbte_tipo: int) -> Dict[str, Any]:
+    t = tenant_get(tenant_cuit)
+    if not t or not t.get("enabled"):
+        raise HTTPException(status_code=404, detail="Tenant no encontrado o deshabilitado.")
+    ta = wsaa_login_get_ta_for(service="wsfe", tenant_cuit=t["cuit"], cert_b64=t["cert_b64"], key_b64=t["key_b64"])
+
+    url = WSFE_URLS[AFIP_ENV]
+    cuit = t["cuit"]
+
+    soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:fe="{WSFE_NS}">
+  <soap:Body>
+    <fe:FECompUltimoAutorizado>
+      <fe:Auth>
+        <fe:Token>{ta["token"]}</fe:Token>
+        <fe:Sign>{ta["sign"]}</fe:Sign>
+        <fe:Cuit>{cuit}</fe:Cuit>
+      </fe:Auth>
+      <fe:PtoVta>{int(pto_vta)}</fe:PtoVta>
+      <fe:CbteTipo>{int(cbte_tipo)}</fe:CbteTipo>
+    </fe:FECompUltimoAutorizado>
+  </soap:Body>
+</soap:Envelope>"""
+
+    raw = _wsfe_call(url, soap, timeout=60)
+
+    root = ET.fromstring(raw)
+
+    # Parse: buscamos CbteNro dentro de FECompUltimoAutorizadoResult
+    cbte_nro = None
+    for el in root.iter():
+        if el.tag.endswith("CbteNro") and el.text:
+            try:
+                cbte_nro = int(el.text.strip())
+                break
+            except Exception:
+                pass
+
+    return {"cbte_nro": cbte_nro, "raw": raw}
+
+
+def wsfe_cae_solicitar(req: WsfeCaeRequest) -> Dict[str, Any]:
+    t = tenant_get(req.cuit)
+    if not t or not t.get("enabled"):
+        raise HTTPException(status_code=404, detail="Tenant no encontrado o deshabilitado.")
+
+    tenant_cuit = t["cuit"]
+    url = WSFE_URLS[AFIP_ENV]
+    ta = wsaa_login_get_ta_for(service="wsfe", tenant_cuit=tenant_cuit, cert_b64=t["cert_b64"], key_b64=t["key_b64"])
+
+    # Lock para numeración correlativa
+    lock = _wsfe_lock_for(tenant_cuit, req.pto_vta, req.cbte_tipo)
+    with lock:
+        # 1) Traer último autorizado
+        last = wsfe_comp_ultimo_autorizado(tenant_cuit, req.pto_vta, req.cbte_tipo)
+        last_nro = int(last.get("cbte_nro") or 0)
+        next_nro = last_nro + 1
+
+        # IVA XML
+        iva_xml = ""
+        if req.iva:
+            iva_items = []
+            for it in req.iva:
+                iva_items.append(
+                    f"""
+            <fe:AlicIva>
+              <fe:Id>{int(it.id)}</fe:Id>
+              <fe:BaseImp>{float(it.base_imp):.2f}</fe:BaseImp>
+              <fe:Importe>{float(it.importe):.2f}</fe:Importe>
+            </fe:AlicIva>"""
+                )
+            iva_xml = f"""
+          <fe:Iva>
+            {''.join(iva_items)}
+          </fe:Iva>"""
+
+        soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:fe="{WSFE_NS}">
+  <soap:Body>
+    <fe:FECAESolicitar>
+      <fe:Auth>
+        <fe:Token>{ta["token"]}</fe:Token>
+        <fe:Sign>{ta["sign"]}</fe:Sign>
+        <fe:Cuit>{tenant_cuit}</fe:Cuit>
+      </fe:Auth>
+      <fe:FeCAEReq>
+        <fe:FeCabReq>
+          <fe:CantReg>1</fe:CantReg>
+          <fe:PtoVta>{int(req.pto_vta)}</fe:PtoVta>
+          <fe:CbteTipo>{int(req.cbte_tipo)}</fe:CbteTipo>
+        </fe:FeCabReq>
+        <fe:FeDetReq>
+          <fe:FECAEDetRequest>
+            <fe:Concepto>{int(req.concepto)}</fe:Concepto>
+            <fe:DocTipo>{int(req.doc_tipo)}</fe:DocTipo>
+            <fe:DocNro>{_norm_cuit(req.doc_nro) if int(req.doc_tipo)==80 else re.sub(r"\\D+","",str(req.doc_nro))}</fe:DocNro>
+            <fe:CbteDesde>{int(next_nro)}</fe:CbteDesde>
+            <fe:CbteHasta>{int(next_nro)}</fe:CbteHasta>
+            <fe:CbteFch>{str(req.cbte_fch).strip()}</fe:CbteFch>
+
+            <fe:ImpTotal>{float(req.imp_total):.2f}</fe:ImpTotal>
+            <fe:ImpTotConc>{float(req.imp_tot_conc):.2f}</fe:ImpTotConc>
+            <fe:ImpNeto>{float(req.imp_neto):.2f}</fe:ImpNeto>
+            <fe:ImpOpEx>{float(req.imp_op_ex):.2f}</fe:ImpOpEx>
+            <fe:ImpTrib>{float(req.imp_trib):.2f}</fe:ImpTrib>
+            <fe:ImpIVA>{float(req.imp_iva):.2f}</fe:ImpIVA>
+
+            <fe:MonId>{str(req.mon_id).strip()}</fe:MonId>
+            <fe:MonCotiz>{float(req.mon_ctz):.6f}</fe:MonCotiz>
+            {iva_xml}
+          </fe:FECAEDetRequest>
+        </fe:FeDetReq>
+      </fe:FeCAEReq>
+    </fe:FECAESolicitar>
+  </soap:Body>
+</soap:Envelope>"""
+
+        raw = _wsfe_call(url, soap, timeout=80)
+        root = ET.fromstring(raw)
+
+        # Parse resultado, CAE, vto, errores/obs
+        cae = None
+        cae_vto = None
+        resultado = None
+        obs = []
+        errs = []
+
+        for el in root.iter():
+            tag = el.tag.split("}")[-1]
+            if tag == "Resultado" and el.text:
+                resultado = el.text.strip()
+            if tag == "CAE" and el.text:
+                cae = el.text.strip()
+            if tag in ("CAEFchVto", "FchVto") and el.text:
+                cae_vto = el.text.strip()
+
+        # Observaciones/Errores (best-effort)
+        for el in root.iter():
+            tag = el.tag.split("}")[-1]
+            if tag == "Obs":
+                # dentro suelen venir Code/Msg
+                code = None
+                msg = None
+                for ch in el.iter():
+                    t2 = ch.tag.split("}")[-1]
+                    if t2 in ("Code", "Codigo") and ch.text:
+                        code = ch.text.strip()
+                    if t2 in ("Msg", "Mensaje") and ch.text:
+                        msg = ch.text.strip()
+                if code or msg:
+                    obs.append({"code": code, "msg": msg})
+            if tag in ("Err", "Errors"):
+                code = None
+                msg = None
+                for ch in el.iter():
+                    t2 = ch.tag.split("}")[-1]
+                    if t2 in ("Code", "Codigo") and ch.text:
+                        code = ch.text.strip()
+                    if t2 in ("Msg", "Mensaje") and ch.text:
+                        msg = ch.text.strip()
+                if code or msg:
+                    errs.append({"code": code, "msg": msg})
+
+        return {
+            "resultado": resultado,
+            "cuit": tenant_cuit,
+            "pto_vta": int(req.pto_vta),
+            "cbte_tipo": int(req.cbte_tipo),
+            "cbte_nro": int(next_nro),
+            "cae": cae,
+            "cae_vto": cae_vto,
+            "observaciones": obs,
+            "errores": errs,
+            "raw": raw,
+        }
+
+
+@app.post("/wsfe/last")
+def wsfe_last_endpoint(
+    payload: WsfeLastRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+    # WSFE no depende de tu AFIP_CUIT, depende del tenant; igual validamos env general
+    if AFIP_ENV not in ("prod", "homo"):
+        raise HTTPException(status_code=500, detail="AFIP_ENV debe ser 'prod' o 'homo'")
+    return wsfe_comp_ultimo_autorizado(payload.cuit, payload.pto_vta, payload.cbte_tipo)
+
+
+@app.post("/wsfe/cae")
+def wsfe_cae_endpoint(
+    payload: WsfeCaeRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+    if AFIP_ENV not in ("prod", "homo"):
+        raise HTTPException(status_code=500, detail="AFIP_ENV debe ser 'prod' o 'homo'")
+    # Contabilizamos request (sin tocar tu PLAN_LIMIT de PDFs)
+    try:
+        usage_total_increment(files_delta=0, requests_delta=1)
+        usage_increment(files_delta=0, requests_delta=1)
+    except Exception:
+        pass
+    try:
+        return wsfe_cae_solicitar(payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# VERIFY ENDPOINT (PROD) — TU LÓGICA, INTACTA
 # ============================================================
 @app.post("/verify")
 async def verify(

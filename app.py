@@ -361,6 +361,42 @@ def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
     return r.json()
 
 
+# ===================== WSFEv1 (FRONT CALLS) =====================
+def backend_tenant_upsert(base_url: str, api_key: str, access_token: str, cuit: str, cert_b64: str, key_b64: str, enabled: bool = True):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    payload = {"cuit": cuit, "cert_b64": cert_b64, "key_b64": key_b64, "enabled": bool(enabled)}
+    r = requests.post(f"{base_url}/tenants/upsert", headers=headers, json=payload, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Tenant upsert falló ({r.status_code}): {r.text}")
+    return r.json()
+
+
+def backend_wsfe_last(base_url: str, api_key: str, access_token: str, cuit: str, pto_vta: int, cbte_tipo: int):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    payload = {"cuit": cuit, "pto_vta": int(pto_vta), "cbte_tipo": int(cbte_tipo)}
+    r = requests.post(f"{base_url}/wsfe/last", headers=headers, json=payload, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"WSFE last falló ({r.status_code}): {r.text}")
+    return r.json()
+
+
+def backend_wsfe_cae(base_url: str, api_key: str, access_token: str, payload: dict):
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    r = requests.post(f"{base_url}/wsfe/cae", headers=headers, json=payload, timeout=90)
+    if r.status_code != 200:
+        raise RuntimeError(f"WSFE CAE falló ({r.status_code}): {r.text}")
+    return r.json()
+
+
 def chunk_list(items, size: int):
     if size <= 0:
         return [items]
@@ -376,7 +412,7 @@ def _wa_renew_url() -> str:
     return f"https://wa.me/{phone}?text={txt}"
 
 
-# ===================== SIDEBAR: LOGIN =====================
+# ===================== SIDEBAR: LOGIN + NAV =====================
 with st.sidebar:
     st.subheader("Acceso")
     api_key = st.session_state.auth["api_key"]
@@ -413,6 +449,14 @@ with st.sidebar:
             }
             st.rerun()
 
+    st.divider()
+    # navegación (solo si está logueado)
+    if st.session_state.auth["logged"]:
+        page = st.radio("Secciones", ["Validación", "Facturación (WSFEv1)"], horizontal=False)
+    else:
+        page = "Validación"
+
+
 # ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
     st.info("Iniciá sesión para comenzar.")
@@ -432,270 +476,462 @@ if not st.session_state.auth["logged"]:
     st.caption("Consejo: si subís muchos archivos, la validación se procesa automáticamente en tandas para evitar demoras.")
     st.stop()
 
-# ===================== INFO GENERAL =====================
-st.info("En una primera instancia detectamos el CAE y su vencimiento directamente desde el PDF cargado. Luego, validamos la información contra AFIP utilizando el servicio oficial WSCDC (ComprobanteConstatar).")
 
-# ===================== PANEL: TOTAL REAL + EMAIL MENSUAL =====================
-st.subheader("Uso del plan")
+# ===================== PÁGINA: VALIDACIÓN (TU LÓGICA INTACTA) =====================
+def render_validacion():
+    # ===================== INFO GENERAL =====================
+    st.info("En una primera instancia detectamos el CAE y su vencimiento directamente desde el PDF cargado. Luego, validamos la información contra AFIP utilizando el servicio oficial WSCDC (ComprobanteConstatar).")
 
-plan_used = None
-plan_limit = None
-plan_remaining = None
-plan_blocked = False
+    # ===================== PANEL: TOTAL REAL + EMAIL MENSUAL =====================
+    st.subheader("Uso del plan")
 
-def _fmt_yyyy_mm_from_iso(s: str) -> str:
-    s = (s or "").strip()
-    if not s:
-        return ""
-    # ISO típico: 2026-02-05T20:07:49.025060+00:00  ->  2026-02
-    if len(s) >= 7 and s[4] == "-":
-        return s[:7]
-    return s
+    plan_used = None
+    plan_limit = None
+    plan_remaining = None
+    plan_blocked = False
 
-try:
-    # ✅ TOTAL REAL (bolsa)
-    usage_total = backend_usage_total(
-        base_url=BASE_URL,
-        api_key=st.session_state.auth["api_key"],
-        access_token=st.session_state.auth["access_token"],
+    def _fmt_yyyy_mm_from_iso(s: str) -> str:
+        s = (s or "").strip()
+        if not s:
+            return ""
+        # ISO típico: 2026-02-05T20:07:49.025060+00:00  ->  2026-02
+        if len(s) >= 7 and s[4] == "-":
+            return s[:7]
+        return s
+
+    try:
+        # ✅ TOTAL REAL (bolsa)
+        usage_total = backend_usage_total(
+            base_url=BASE_URL,
+            api_key=st.session_state.auth["api_key"],
+            access_token=st.session_state.auth["access_token"],
+        )
+        total_files = int(usage_total.get("files_count", 0) or 0)
+        total_requests = int(usage_total.get("requests_count", 0) or 0)
+
+        total_updated_at_raw = usage_total.get("updated_at", "") or ""
+        total_updated_at = _fmt_yyyy_mm_from_iso(total_updated_at_raw)
+
+        # Límite del plan (solo para UI; el bloqueo real lo hace el backend)
+        FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
+        plan_used = total_files
+        plan_limit = FRONT_PLAN_LIMIT
+        if plan_limit is not None:
+            plan_remaining = max(0, int(plan_limit) - int(plan_used))
+            plan_blocked = plan_used >= plan_limit
+
+        colm1, colm2, colm3 = st.columns(3)
+        with colm1:
+            st.metric("PDF consumidos (total)", total_files)
+        with colm2:
+            st.metric("Requests (total)", total_requests)
+        with colm3:
+            # ✅ queda igual que el mensual (YYYY-MM)
+            st.metric("Mes", total_updated_at or "-")
+
+        if plan_limit is not None:
+            st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
+            if plan_blocked:
+                st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
+                st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
+
+    except Exception:
+        st.warning("No pudimos obtener el uso TOTAL en este momento. Probá nuevamente en unos segundos.")
+
+    # ✅ Mantengo tu sección de email mensual (sin tocar lógica)
+    st.subheader("Resumen de uso del mes")
+
+    try:
+        usage = backend_usage_current(
+            base_url=BASE_URL,
+            api_key=st.session_state.auth["api_key"],
+            access_token=st.session_state.auth["access_token"],
+        )
+        ym = usage.get("year_month", "")
+        files_count = int(usage.get("files_count", 0) or 0)
+        requests_count = int(usage.get("requests_count", 0) or 0)
+
+        colm1, colm2, colm3 = st.columns(3)
+        with colm1:
+            st.metric("PDF procesados (mes)", files_count)
+        with colm2:
+            st.metric("Solicitudes (mes)", requests_count)
+        with colm3:
+            st.metric("Mes", ym or "-")
+
+        cbtn1, cbtn2 = st.columns([1, 3])
+        with cbtn1:
+            if st.button("Enviar resumen por email", use_container_width=True):
+                try:
+                    backend_send_usage_email(
+                        base_url=BASE_URL,
+                        api_key=st.session_state.auth["api_key"],
+                        access_token=st.session_state.auth["access_token"],
+                    )
+                    st.success("Email enviado correctamente.")
+                except Exception as e:
+                    st.error(str(e))
+
+    except Exception:
+        st.warning("No pudimos obtener el resumen mensual en este momento. Probá nuevamente en unos segundos.")
+
+    st.divider()
+
+    # ===================== CARGA ARCHIVOS =====================
+    st.subheader("Carga de facturas")
+
+    help_text = "sin límite" if MAX_FILES is None else f"hasta {MAX_FILES}"
+    mode = st.radio(
+        "Modo de carga",
+        [f"PDF ({help_text})", f"ZIP ({help_text})"],
+        horizontal=True,
+        key="mode_upload",
     )
-    total_files = int(usage_total.get("files_count", 0) or 0)
-    total_requests = int(usage_total.get("requests_count", 0) or 0)
 
-    total_updated_at_raw = usage_total.get("updated_at", "") or ""
-    total_updated_at = _fmt_yyyy_mm_from_iso(total_updated_at_raw)
+    pdf_files = []
 
-    # Límite del plan (solo para UI; el bloqueo real lo hace el backend)
-    FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
-    plan_used = total_files
-    plan_limit = FRONT_PLAN_LIMIT
-    if plan_limit is not None:
-        plan_remaining = max(0, int(plan_limit) - int(plan_used))
-        plan_blocked = plan_used >= plan_limit
-
-    colm1, colm2, colm3 = st.columns(3)
-    with colm1:
-        st.metric("PDF consumidos (total)", total_files)
-    with colm2:
-        st.metric("Requests (total)", total_requests)
-    with colm3:
-        # ✅ queda igual que el mensual (YYYY-MM)
-        st.metric("Mes", total_updated_at or "-")
-
-    if plan_limit is not None:
-        st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
-        if plan_blocked:
-            st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
-            st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
-
-except Exception:
-    st.warning("No pudimos obtener el uso TOTAL en este momento. Probá nuevamente en unos segundos.")
-
-# ✅ Mantengo tu sección de email mensual (sin tocar lógica)
-st.subheader("Resumen de uso del mes")
-
-try:
-    usage = backend_usage_current(
-        base_url=BASE_URL,
-        api_key=st.session_state.auth["api_key"],
-        access_token=st.session_state.auth["access_token"],
-    )
-    ym = usage.get("year_month", "")
-    files_count = int(usage.get("files_count", 0) or 0)
-    requests_count = int(usage.get("requests_count", 0) or 0)
-
-    colm1, colm2, colm3 = st.columns(3)
-    with colm1:
-        st.metric("PDF procesados (mes)", files_count)
-    with colm2:
-        st.metric("Solicitudes (mes)", requests_count)
-    with colm3:
-        st.metric("Mes", ym or "-")
-
-    cbtn1, cbtn2 = st.columns([1, 3])
-    with cbtn1:
-        if st.button("Enviar resumen por email", use_container_width=True):
+    if mode.startswith("PDF"):
+        uploaded = st.file_uploader("Subí tus facturas en PDF", type=["pdf"], accept_multiple_files=True, key="uploader_pdf")
+        if uploaded:
+            if MAX_FILES is not None and len(uploaded) > MAX_FILES:
+                st.warning(f"Subiste {len(uploaded)} PDF. Por configuración se procesarán solo los primeros {MAX_FILES}.")
+                uploaded = uploaded[:MAX_FILES]
+            pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
+    else:
+        zip_up = st.file_uploader("Subí 1 archivo ZIP", type=["zip"], key="uploader_zip")
+        if zip_up:
             try:
-                backend_send_usage_email(
+                with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
+                    names = [n for n in z.namelist() if n.lower().endswith(".pdf") and not n.endswith("/")]
+                    if not names:
+                        st.error("No encontramos PDF dentro del ZIP.")
+                    else:
+                        if MAX_FILES is not None and len(names) > MAX_FILES:
+                            st.warning(f"El ZIP tiene {len(names)} PDF. Por configuración se procesarán solo {MAX_FILES}.")
+                            names = names[:MAX_FILES]
+                        pdf_files = [{"name": n.split("/")[-1], "bytes": z.read(n)} for n in names]
+                        st.success(f"PDF detectados: {len(pdf_files)}")
+            except zipfile.BadZipFile:
+                st.error("ZIP inválido o dañado.")
+
+    # ===================== PREVALIDACIÓN LOCAL =====================
+    rows = []
+    if pdf_files:
+        today = datetime.now().date()
+        progress = st.progress(0)
+
+        for i, f in enumerate(pdf_files, start=1):
+            try:
+                text = extract_text_pdf(f["bytes"], max_pages=5)
+                cae = find_first(CAE_PATTERNS, text)
+                vto_raw = find_first(VTO_PATTERNS, text)
+                vto_date = parse_date(vto_raw)
+
+                fmt_ok = basic_format_ok(cae)
+                vig_ok = (vto_date is not None and vto_date >= today)
+
+                status = []
+                status.append("CAE encontrado" if cae else "CAE no encontrado")
+                if fmt_ok:
+                    status.append("Formato OK")
+                elif cae:
+                    status.append("Formato a revisar")
+                if vto_date:
+                    status.append("Vigente" if vig_ok else "Vencido")
+                else:
+                    status.append("Vto no detectado")
+
+                rows.append(
+                    {
+                        "Archivo": f["name"],
+                        "CAE": cae or "",
+                        "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
+                        "Estado": " | ".join(status),
+                        "AFIP": "",
+                        "Detalle AFIP": "",
+                    }
+                )
+            except Exception as e:
+                rows.append(
+                    {
+                        "Archivo": f["name"],
+                        "CAE": "",
+                        "Vto CAE": "",
+                        "Estado": f"Error al leer el PDF: {e}",
+                        "AFIP": "",
+                        "Detalle AFIP": "",
+                    }
+                )
+
+            progress.progress(i / len(pdf_files))
+
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
+
+    st.subheader("Vista previa PDF cargados")
+    st.dataframe(df, use_container_width=True)
+
+    # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
+    st.subheader("Validación contra AFIP")
+    st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
+    st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDF (ajustable).")
+
+    # ✅ Bloqueo visual: si el front conoce el plan y está vencido, deshabilita el botón.
+    button_disabled = bool(plan_blocked)
+
+    if st.button("Validar ahora", use_container_width=True, disabled=button_disabled, key="btn_validar"):
+        if not pdf_files:
+            st.error("Primero cargá PDF o un ZIP")
+            st.stop()
+
+        try:
+            all_rows = []
+            batches = chunk_list(pdf_files, BATCH_SIZE)
+
+            batch_progress = st.progress(0)
+            with st.spinner("Consultando AFIP..."):
+                for idx, batch in enumerate(batches, start=1):
+                    result = backend_verify(
+                        base_url=BASE_URL,
+                        api_key=st.session_state.auth["api_key"],
+                        access_token=st.session_state.auth["access_token"],
+                        pdf_items=batch,
+                        timeout_s=180,
+                    )
+                    backend_rows = result.get("rows", [])
+                    all_rows.extend(backend_rows)
+                    batch_progress.progress(idx / len(batches))
+
+            if all_rows:
+                df = pd.DataFrame(all_rows)
+                st.success("Validación completada.")
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.warning("No pudimos obtener resultados del servidor. Probá de nuevo en unos segundos.")
+        except Exception as e:
+            st.error(str(e))
+            # Si el error fue plan límite, mostrar CTA directo
+            if "límite de su plan" in str(e).lower() or "plan_limit_reached" in str(e).lower():
+                st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
+
+    # ===================== EXPORTS (CSV + XLSX) =====================
+    if not df.empty:
+        # CAE como texto (evitar notación científica en Excel)
+        if "CAE" in df.columns:
+            df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+
+        # limpiar saltos
+        if "Estado" in df.columns:
+            df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
+
+        st.subheader("Descargas")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+            st.download_button(
+                "Descargar CSV (.csv)",
+                data=csv_bytes,
+                file_name="resultado_verificacion_cae.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col2:
+            xlsx_buffer = io.BytesIO()
+            with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
+                df.to_excel(writer, index=False, sheet_name="Resultados")
+            st.download_button(
+                "Descargar Excel (.xlsx)",
+                data=xlsx_buffer.getvalue(),
+                file_name="resultado_verificacion_cae.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+
+# ===================== PÁGINA: FACTURACIÓN WSFEv1 =====================
+def render_facturacion():
+    st.info("Facturación (WSFEv1): emisión de comprobantes con CAE. Cada cliente emite con su CUIT y certificado. (El PDF lo generás vos; WSFE autoriza y devuelve CAE).")
+
+    st.subheader("1) Configurar emisor (CUIT + Certificado)")
+    st.caption("Esto guarda/actualiza credenciales del cliente en el backend (tenant). Recomendado: que lo haga un admin/soporte.")
+
+    cuit_tenant = st.text_input("CUIT emisor (11 dígitos, sin guiones)", key="ten_cuit")
+    cert_b64 = st.text_area("CERT_B64 (base64 PEM o DER)", height=140, key="ten_cert")
+    key_b64 = st.text_area("KEY_B64 (base64 PEM o DER)", height=140, key="ten_key")
+    enabled = st.checkbox("Habilitado", value=True, key="ten_enabled")
+
+    colx1, colx2 = st.columns(2)
+    with colx1:
+        if st.button("Guardar emisor", use_container_width=True, key="btn_tenant_save"):
+            try:
+                resp = backend_tenant_upsert(
                     base_url=BASE_URL,
                     api_key=st.session_state.auth["api_key"],
                     access_token=st.session_state.auth["access_token"],
+                    cuit=cuit_tenant,
+                    cert_b64=cert_b64,
+                    key_b64=key_b64,
+                    enabled=enabled,
                 )
-                st.success("Email enviado correctamente.")
+                st.success("Emisor guardado correctamente.")
+                st.json(resp)
             except Exception as e:
                 st.error(str(e))
 
-except Exception:
-    st.warning("No pudimos obtener el resumen mensual en este momento. Probá nuevamente en unos segundos.")
+    with colx2:
+        st.caption("Tip: podés pegar el base64 entero. Si viene con saltos de línea, no pasa nada.")
 
-st.divider()
+    st.divider()
 
-# ===================== CARGA ARCHIVOS =====================
-st.subheader("Carga de facturas")
+    st.subheader("2) Emitir comprobante (FECAESolicitar)")
+    st.caption("MVP: se envían importes + receptor. Para productos/ítems, los manejás internamente (WSFEv1 trabaja por totales).")
 
-help_text = "sin límite" if MAX_FILES is None else f"hasta {MAX_FILES}"
-mode = st.radio(
-    "Modo de carga",
-    [f"PDF ({help_text})", f"ZIP ({help_text})"],
-    horizontal=True,
-)
+    # Defaults razonables para Argentina
+    cuit_emit = st.text_input("CUIT emisor (tenant)", value=cuit_tenant or "", key="emit_cuit")
+    pto_vta = st.number_input("Punto de venta", min_value=1, max_value=99999, value=1, step=1, key="emit_ptovta")
+    cbte_tipo = st.number_input("Tipo comprobante (ej: 11=Factura C / 1=Factura A / 6=Factura B)", min_value=1, max_value=999, value=11, step=1, key="emit_tipo")
+    concepto = st.selectbox("Concepto", options=[1, 2, 3], index=0, format_func=lambda x: {1: "1 - Productos", 2: "2 - Servicios", 3: "3 - Prod y Serv"}[x], key="emit_conc")
 
-pdf_files = []
+    colr1, colr2 = st.columns(2)
+    with colr1:
+        doc_tipo = st.selectbox("DocTipo receptor", options=[80, 96], index=0, format_func=lambda x: {80: "80 - CUIT", 96: "96 - DNI"}[x], key="emit_doct")
+    with colr2:
+        doc_nro = st.text_input("DocNro receptor (CUIT 11 / DNI 7-8)", key="emit_docn")
 
-if mode.startswith("PDF"):
-    uploaded = st.file_uploader("Subí tus facturas en PDF", type=["pdf"], accept_multiple_files=True)
-    if uploaded:
-        if MAX_FILES is not None and len(uploaded) > MAX_FILES:
-            st.warning(f"Subiste {len(uploaded)} PDF. Por configuración se procesarán solo los primeros {MAX_FILES}.")
-            uploaded = uploaded[:MAX_FILES]
-        pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
-else:
-    zip_up = st.file_uploader("Subí 1 archivo ZIP", type=["zip"])
-    if zip_up:
-        try:
-            with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
-                names = [n for n in z.namelist() if n.lower().endswith(".pdf") and not n.endswith("/")]
-                if not names:
-                    st.error("No encontramos PDF dentro del ZIP.")
-                else:
-                    if MAX_FILES is not None and len(names) > MAX_FILES:
-                        st.warning(f"El ZIP tiene {len(names)} PDF. Por configuración se procesarán solo {MAX_FILES}.")
-                        names = names[:MAX_FILES]
-                    pdf_files = [{"name": n.split("/")[-1], "bytes": z.read(n)} for n in names]
-                    st.success(f"PDF detectados: {len(pdf_files)}")
-        except zipfile.BadZipFile:
-            st.error("ZIP inválido o dañado.")
+    cbte_fch = st.text_input("Fecha comprobante (YYYYMMDD)", value=datetime.now().strftime("%Y%m%d"), key="emit_fch")
 
-# ===================== PREVALIDACIÓN LOCAL =====================
-rows = []
-if pdf_files:
-    today = datetime.now().date()
-    progress = st.progress(0)
+    st.markdown("**Importes**")
+    colm1, colm2, colm3 = st.columns(3)
+    with colm1:
+        imp_total = st.number_input("ImpTotal", min_value=0.0, value=0.0, step=1.0, key="emit_total")
+    with colm2:
+        imp_neto = st.number_input("ImpNeto", min_value=0.0, value=0.0, step=1.0, key="emit_neto")
+    with colm3:
+        imp_iva = st.number_input("ImpIVA", min_value=0.0, value=0.0, step=1.0, key="emit_iva")
 
-    for i, f in enumerate(pdf_files, start=1):
-        try:
-            text = extract_text_pdf(f["bytes"], max_pages=5)
-            cae = find_first(CAE_PATTERNS, text)
-            vto_raw = find_first(VTO_PATTERNS, text)
-            vto_date = parse_date(vto_raw)
+    colm4, colm5, colm6 = st.columns(3)
+    with colm4:
+        imp_trib = st.number_input("ImpTrib", min_value=0.0, value=0.0, step=1.0, key="emit_trib")
+    with colm5:
+        imp_op_ex = st.number_input("ImpOpEx", min_value=0.0, value=0.0, step=1.0, key="emit_opex")
+    with colm6:
+        imp_tot_conc = st.number_input("ImpTotConc", min_value=0.0, value=0.0, step=1.0, key="emit_concimp")
 
-            fmt_ok = basic_format_ok(cae)
-            vig_ok = (vto_date is not None and vto_date >= today)
+    st.markdown("**Moneda**")
+    colmo1, colmo2 = st.columns(2)
+    with colmo1:
+        mon_id = st.text_input("MonId", value="PES", key="emit_monid")
+    with colmo2:
+        mon_ctz = st.number_input("MonCotiz", min_value=0.000001, value=1.0, step=0.1, key="emit_monctz")
 
-            status = []
-            status.append("CAE encontrado" if cae else "CAE no encontrado")
-            if fmt_ok:
-                status.append("Formato OK")
-            elif cae:
-                status.append("Formato a revisar")
-            if vto_date:
-                status.append("Vigente" if vig_ok else "Vencido")
-            else:
-                status.append("Vto no detectado")
+    # IVA opcional (simple)
+    st.markdown("**IVA (opcional)**")
+    st.caption("Si usás Factura A/B normalmente cargás alícuotas. Si emitís C, suele ir 0.")
+    use_iva = st.checkbox("Cargar alícuotas de IVA", value=False, key="emit_use_iva")
 
-            rows.append(
-                {
-                    "Archivo": f["name"],
-                    "CAE": cae or "",
-                    "Vto CAE": vto_date.strftime("%d/%m/%Y") if vto_date else "",
-                    "Estado": " | ".join(status),
-                    "AFIP": "",
-                    "Detalle AFIP": "",
-                }
-            )
-        except Exception as e:
-            rows.append(
-                {
-                    "Archivo": f["name"],
-                    "CAE": "",
-                    "Vto CAE": "",
-                    "Estado": f"Error al leer el PDF: {e}",
-                    "AFIP": "",
-                    "Detalle AFIP": "",
-                }
-            )
+    iva_items = []
+    if use_iva:
+        coliv1, coliv2, coliv3 = st.columns(3)
+        with coliv1:
+            iva_id = st.number_input("Id alícuota (ej: 5=21%, 4=10.5%, 3=0%)", min_value=1, max_value=999, value=5, step=1, key="emit_iva_id")
+        with coliv2:
+            iva_base = st.number_input("BaseImp", min_value=0.0, value=0.0, step=1.0, key="emit_iva_base")
+        with coliv3:
+            iva_imp = st.number_input("Importe IVA", min_value=0.0, value=0.0, step=1.0, key="emit_iva_imp")
 
-        progress.progress(i / len(pdf_files))
+        if st.button("Agregar alícuota", use_container_width=True, key="btn_add_iva"):
+            if "iva_list" not in st.session_state:
+                st.session_state.iva_list = []
+            st.session_state.iva_list.append({"id": int(iva_id), "base_imp": float(iva_base), "importe": float(iva_imp)})
+            st.rerun()
 
-df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
+        iva_items = st.session_state.get("iva_list", [])
+        if iva_items:
+            st.write("Alícuotas cargadas:")
+            st.dataframe(pd.DataFrame(iva_items), use_container_width=True)
+            if st.button("Limpiar IVA", use_container_width=True, key="btn_clear_iva"):
+                st.session_state.iva_list = []
+                st.rerun()
 
-st.subheader("Vista previa PDF cargados")
-st.dataframe(df, use_container_width=True)
+    st.divider()
 
-# ===================== VALIDACIÓN AFIP VIA BACKEND =====================
-st.subheader("Validación contra AFIP")
-st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
-st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDF (ajustable).")
-
-# ✅ Bloqueo visual: si el front conoce el plan y está vencido, deshabilita el botón.
-button_disabled = bool(plan_blocked)
-
-if st.button("Validar ahora", use_container_width=True, disabled=button_disabled):
-    if not pdf_files:
-        st.error("Primero cargá PDF o un ZIP")
-        st.stop()
-
-    try:
-        all_rows = []
-        batches = chunk_list(pdf_files, BATCH_SIZE)
-
-        batch_progress = st.progress(0)
-        with st.spinner("Consultando AFIP..."):
-            for idx, batch in enumerate(batches, start=1):
-                result = backend_verify(
+    colb1, colb2 = st.columns(2)
+    with colb1:
+        if st.button("Consultar último autorizado", use_container_width=True, key="btn_last"):
+            try:
+                resp = backend_wsfe_last(
                     base_url=BASE_URL,
                     api_key=st.session_state.auth["api_key"],
                     access_token=st.session_state.auth["access_token"],
-                    pdf_items=batch,
-                    timeout_s=180,
+                    cuit=cuit_emit,
+                    pto_vta=int(pto_vta),
+                    cbte_tipo=int(cbte_tipo),
                 )
-                backend_rows = result.get("rows", [])
-                all_rows.extend(backend_rows)
-                batch_progress.progress(idx / len(batches))
+                st.success("OK")
+                st.json(resp)
+            except Exception as e:
+                st.error(str(e))
 
-        if all_rows:
-            df = pd.DataFrame(all_rows)
-            st.success("Validación completada.")
-            st.dataframe(df, use_container_width=True)
-        else:
-            st.warning("No pudimos obtener resultados del servidor. Probá de nuevo en unos segundos.")
-    except Exception as e:
-        st.error(str(e))
-        # Si el error fue plan límite, mostrar CTA directo
-        if "límite de su plan" in str(e).lower() or "plan_limit_reached" in str(e).lower():
-            st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
+    with colb2:
+        if st.button("Emitir (obtener CAE)", use_container_width=True, key="btn_emit"):
+            try:
+                payload = {
+                    "cuit": str(cuit_emit).strip(),
+                    "pto_vta": int(pto_vta),
+                    "cbte_tipo": int(cbte_tipo),
+                    "concepto": int(concepto),
+                    "doc_tipo": int(doc_tipo),
+                    "doc_nro": str(doc_nro).strip(),
+                    "cbte_fch": str(cbte_fch).strip(),
+                    "imp_total": float(imp_total),
+                    "imp_tot_conc": float(imp_tot_conc),
+                    "imp_neto": float(imp_neto),
+                    "imp_op_ex": float(imp_op_ex),
+                    "imp_trib": float(imp_trib),
+                    "imp_iva": float(imp_iva),
+                    "mon_id": str(mon_id).strip(),
+                    "mon_ctz": float(mon_ctz),
+                    "iva": iva_items or [],
+                }
 
-# ===================== EXPORTS (CSV + XLSX) =====================
-if not df.empty:
-    # CAE como texto (evitar notación científica en Excel)
-    if "CAE" in df.columns:
-        df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+                resp = backend_wsfe_cae(
+                    base_url=BASE_URL,
+                    api_key=st.session_state.auth["api_key"],
+                    access_token=st.session_state.auth["access_token"],
+                    payload=payload,
+                )
 
-    # limpiar saltos
-    if "Estado" in df.columns:
-        df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
+                st.success("Respuesta WSFE recibida.")
+                st.json(resp)
 
-    st.subheader("Descargas")
-    col1, col2 = st.columns(2)
+                cae = (resp.get("cae") or "").strip()
+                cae_vto = (resp.get("cae_vto") or "").strip()
+                cbtenro = resp.get("cbte_nro")
 
-    with col1:
-        csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-        st.download_button(
-            "Descargar CSV (.csv)",
-            data=csv_bytes,
-            file_name="resultado_verificacion_cae.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+                if cae:
+                    st.metric("CAE", cae)
+                if cae_vto:
+                    st.metric("Vto CAE", cae_vto)
+                if cbtenro is not None:
+                    st.metric("Nro Comprobante", cbtenro)
 
-    with col2:
-        xlsx_buffer = io.BytesIO()
-        with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="Resultados")
-        st.download_button(
-            "Descargar Excel (.xlsx)",
-            data=xlsx_buffer.getvalue(),
-            file_name="resultado_verificacion_cae.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+                # Descarga de la respuesta (útil para auditoría)
+                raw_json = (pd.Series(resp).to_json(orient="index", force_ascii=False)).encode("utf-8")
+                st.download_button(
+                    "Descargar respuesta (JSON)",
+                    data=raw_json,
+                    file_name="wsfe_respuesta.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+
+            except Exception as e:
+                st.error(str(e))
+
+
+# ===================== ROUTER =====================
+if page == "Facturación (WSFEv1)":
+    render_facturacion()
+else:
+    render_validacion()
