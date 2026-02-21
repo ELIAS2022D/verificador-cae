@@ -33,13 +33,14 @@ from pydantic import BaseModel, Field
 # ===== Email (Resend + Brevo) =====
 import resend
 
-# ✅ NUEVO: SMTP (para brevo_smtp)
+# ✅ SMTP (para brevo_smtp)
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 
 # ✅ PDF generación (endpoint /wsfe/pdf)
-# Asegurate de tener "reportlab" en requirements.txt
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
@@ -102,10 +103,6 @@ def _norm_cuit(x: str) -> str:
 # ============================================================
 # USAGE COUNTER (SQLite en disk de Render)
 # ============================================================
-# PRIORIDAD:
-# 1) SQLITE_PATH (si lo seteás explícito)
-# 2) Si existe /var/data (Render Disk) => /var/data/usage.db
-# 3) fallback => /tmp/usage.db (efímero)
 SQLITE_PATH = (os.getenv("SQLITE_PATH", "") or "").strip()
 if not SQLITE_PATH:
     if os.path.isdir("/var/data"):
@@ -130,7 +127,6 @@ def _ensure_sqlite_dir():
 def _sqlite_init():
     _ensure_sqlite_dir()
     with sqlite3.connect(SQLITE_PATH) as con:
-        # mensual (reportes/email)
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_monthly (
@@ -142,7 +138,6 @@ def _sqlite_init():
             """
         )
 
-        # total (bolsa real)
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_total (
@@ -164,7 +159,7 @@ def _sqlite_init():
             (now_iso,),
         )
 
-        # ✅ tenants WSFE (por cliente)
+        # tenants WSFE (por cliente)
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS tenants (
@@ -278,16 +273,12 @@ def usage_total_endpoint(x_api_key: str = Header(default=""), authorization: str
 
 
 # ============================================================
-# PLAN LIMIT (se configura por ENV en el backend)
+# PLAN LIMIT
 # ============================================================
-PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100"))  # ej: 100 / 500 / 1000 / ...
+PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100"))
 
 
 def check_plan_limit_or_raise(files_to_add: int):
-    """
-    Bloquea validaciones cuando se alcanza el límite del plan.
-    ✅ Control real en backend contra CONTADOR TOTAL (bolsa), no mensual.
-    """
     usage = usage_total_current()
     used = int(usage.get("files_count", 0))
     limit = int(PLAN_LIMIT)
@@ -305,7 +296,7 @@ def check_plan_limit_or_raise(files_to_add: int):
 
 
 # ============================================================
-# EMAIL REPORT (Resend + Brevo)  ✅ ACTUALIZADO
+# EMAIL (Resend + Brevo + Brevo SMTP)
 # ============================================================
 EMAIL_PROVIDER = (os.getenv("EMAIL_PROVIDER", "resend") or "").strip().lower()
 
@@ -438,9 +429,149 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
 def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
-    u = usage_current()  # ✅ email sigue siendo mensual
+    u = usage_current()
     try:
         return send_usage_report_email(u)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# ✅ NUEVO: WSFE EMAIL (PDF adjunto) — requerido por tu FRONT
+# ============================================================
+class WsfeEmailRequest(BaseModel):
+    to_email: str
+    pdf_payload: Dict[str, Any]  # incluye lo que usa /wsfe/pdf
+
+
+def _send_email_with_pdf_smtp(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
+    if not SMTP_FROM:
+        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
+        raise RuntimeError("Faltan SMTP_HOST/SMTP_USER/SMTP_PASS para enviar adjuntos por SMTP.")
+
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text, "plain", "utf-8"))
+    alt.attach(MIMEText(html, "html", "utf-8"))
+    msg.attach(alt)
+
+    part = MIMEBase("application", "pdf")
+    part.set_payload(pdf_bytes)
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+    msg.attach(part)
+
+    _, from_email = _parse_from_name_email(SMTP_FROM)
+    envelope_from = from_email if from_email and "@" in from_email else SMTP_FROM
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.sendmail(envelope_from, [to_email], msg.as_string())
+
+
+def _send_email_with_pdf_brevo_api(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
+    if not BREVO_API_KEY:
+        raise RuntimeError("Falta BREVO_API_KEY en variables de entorno.")
+    if not SMTP_FROM:
+        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
+
+    from_name, from_email = _parse_from_name_email(SMTP_FROM)
+    if not from_email or "@" not in from_email:
+        raise RuntimeError("SMTP_FROM inválido. Formato: 'Nombre <email@dominio>' o 'email@dominio'.")
+
+    att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    payload = {
+        "sender": {"name": from_name, "email": from_email},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "htmlContent": html,
+        "textContent": text,
+        "attachment": [{"content": att_b64, "name": filename}],
+    }
+
+    r = requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Brevo API error {r.status_code}: {r.text[:1200]}")
+    return r.json()
+
+
+@app.post("/wsfe/email")
+def wsfe_email_endpoint(
+    payload: WsfeEmailRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    """
+    Requerido por el FRONT:
+      POST /wsfe/email
+      { "to_email": "...", "pdf_payload": { ... } }
+
+    - Genera el PDF usando /wsfe/pdf internamente
+    - Envía mail con PDF adjunto
+    """
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+
+    to_email = (payload.to_email or "").strip()
+    if not to_email or "@" not in to_email:
+        raise HTTPException(status_code=400, detail="to_email inválido.")
+
+    # Generar PDF usando el mismo builder para evitar duplicación
+    try:
+        pdf_req = WsfePdfRequest(**(payload.pdf_payload or {}))
+        pdf_bytes = _build_simple_invoice_pdf(pdf_req)
+        filename = f"factura_{_norm_cuit(pdf_req.cuit)}_{pdf_req.pto_vta}_{pdf_req.cbte_tipo}_{pdf_req.cbte_nro}.pdf"
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"pdf_payload inválido o incompleto: {e}")
+
+    subject = "Comprobante electrónico (LexaCAE)"
+    text = (
+        "Adjuntamos el comprobante electrónico.\n\n"
+        "Si necesitás ayuda o reenvío, respondé a este correo.\n"
+    )
+    html = (
+        "<div style='font-family: Arial, sans-serif; line-height:1.5'>"
+        "<h3>Comprobante electrónico</h3>"
+        "<p>Adjuntamos el comprobante electrónico en PDF.</p>"
+        "<p>Si necesitás ayuda o reenvío, respondé a este correo.</p>"
+        "</div>"
+    )
+
+    provider = (EMAIL_PROVIDER or "").strip().lower()
+
+    # contabilizar request (no toca PLAN_LIMIT de PDFs)
+    try:
+        usage_total_increment(files_delta=0, requests_delta=1)
+        usage_increment(files_delta=0, requests_delta=1)
+    except Exception:
+        pass
+
+    try:
+        if provider == "brevo_smtp":
+            _send_email_with_pdf_smtp(to_email, subject, text, html, pdf_bytes, filename)
+            return {"ok": True, "provider": "brevo_smtp", "to": to_email, "filename": filename}
+
+        if provider == "brevo":
+            resp = _send_email_with_pdf_brevo_api(to_email, subject, text, html, pdf_bytes, filename)
+            return {"ok": True, "provider": "brevo", "to": to_email, "filename": filename, "brevo": resp}
+
+        # Resend con adjuntos: no lo implemento acá para no dejarte algo “a medias” que falle en prod.
+        if provider == "resend":
+            raise RuntimeError("Para enviar PDF adjunto, configurá EMAIL_PROVIDER=brevo_smtp o EMAIL_PROVIDER=brevo.")
+
+        raise RuntimeError(f"EMAIL_PROVIDER no soportado para adjuntos: {provider}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -458,10 +589,6 @@ def _pdf_page_to_png_bytes(pdf_bytes: bytes, page_index: int = 0, dpi: int = 220
 
 
 def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]:
-    """
-    Intenta leer QR AFIP (RG 4892). Devuelve dict si encuentra payload, si no {}.
-    Maneja base64 urlsafe (con '-' '_' ) y prueba todos los QRs detectados.
-    """
     for pi in range(max_pages):
         try:
             img_bytes = _pdf_page_to_png_bytes(pdf_bytes, page_index=pi, dpi=240)
@@ -723,9 +850,8 @@ def _sanitize_receptor(doc_tipo: Optional[int], doc_nro: Optional[str]) -> Tuple
 # ============================================================
 # AFIP CONFIG (WSAA + WSCDC)
 # ============================================================
-AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()  # prod | homo
+AFIP_ENV = os.getenv("AFIP_ENV", "prod").strip().lower()
 
-# ✅ OJO: AFIP_CUIT es SOLO consultante WSCDC (tu cuenta habilitada).
 AFIP_CUIT = os.getenv("AFIP_CUIT", "").strip()
 AFIP_CERT_B64 = os.getenv("AFIP_CERT_B64", "")
 AFIP_KEY_B64 = os.getenv("AFIP_KEY_B64", "")
@@ -760,9 +886,8 @@ WSFE_URLS = {
     "homo": "https://wswhomo.afip.gob.ar/wsfev1/service.asmx",
 }
 
-# En general el NS es:
 WSFE_NS = os.getenv("WSFE_NS", "http://ar.gov.afip.dif.FEV1/").strip()
-WSFE_SOAP_ACTION = os.getenv("WSFE_SOAP_ACTION", "").strip()  # opcional
+WSFE_SOAP_ACTION = os.getenv("WSFE_SOAP_ACTION", "").strip()
 
 
 def require_afip_env_wscdc():
@@ -797,9 +922,7 @@ AFIP_SESSION.mount("https://wsaahomo.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://servicios1.afip.gov.ar", AfipTLSAdapter())
 AFIP_SESSION.mount("https://wswhomo.afip.gob.ar", AfipTLSAdapter())
 
-
-# Cache WSAA por tenant+service (para WSFE) y por service (para WSCDC)
-_TA_CACHE: Dict[str, Any] = {}  # key => {token, sign, exp_utc}
+_TA_CACHE: Dict[str, Any] = {}
 
 
 def build_tra(service: str) -> str:
@@ -945,12 +1068,10 @@ def _wsaa_login_get_ta(service: str, env_cert_b64: str, env_key_b64: str, cache_
 
 
 def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
-    # WSCDC usa el cert/key “global” (tu cuenta consultante habilitada)
     return _wsaa_login_get_ta(service=service, env_cert_b64=AFIP_CERT_B64, env_key_b64=AFIP_KEY_B64, cache_key=f"global:{AFIP_ENV}:{service}")
 
 
 def wsaa_login_get_ta_for(service: str, tenant_cuit: str, cert_b64: str, key_b64: str) -> Dict[str, str]:
-    # WSFE usa credenciales del tenant
     ck = f"tenant:{AFIP_ENV}:{service}:{_norm_cuit(tenant_cuit)}"
     return _wsaa_login_get_ta(service=service, env_cert_b64=cert_b64, env_key_b64=key_b64, cache_key=ck)
 
@@ -1080,7 +1201,6 @@ async def verify(
             doc_tipo_rec, doc_nro_rec = decide_receptor_doc(text, cuit_emisor=cuit_emisor or "")
             doc_tipo_rec, doc_nro_rec = _sanitize_receptor(doc_tipo_rec, doc_nro_rec)
 
-            # QR como source of truth
             if qr:
                 try:
                     if qr.get("cuit"):
@@ -1331,7 +1451,7 @@ async def verify(
 
 
 # ============================================================
-# TENANTS WSFE (guardar CUIT + cert/key por cliente)
+# TENANTS WSFE
 # ============================================================
 class TenantUpsertRequest(BaseModel):
     cuit: str
@@ -1397,7 +1517,7 @@ def tenants_upsert_endpoint(
 
 
 # ============================================================
-# WSFEv1 (FACTURACIÓN) — cada cliente emite con su CUIT y su cert/key
+# WSFEv1
 # ============================================================
 class WsfeLastRequest(BaseModel):
     cuit: str
@@ -1513,7 +1633,6 @@ def wsfe_cae_solicitar(req: WsfeCaeRequest) -> Dict[str, Any]:
         last_nro = int(last.get("cbte_nro") or 0)
         next_nro = last_nro + 1
 
-        # IVA XML
         iva_xml = ""
         if req.iva:
             iva_items = []
@@ -1531,7 +1650,6 @@ def wsfe_cae_solicitar(req: WsfeCaeRequest) -> Dict[str, Any]:
             {''.join(iva_items)}
           </fe:Iva>"""
 
-        # ✅ FIX DEPLOY: NO meter regex con "\" dentro de { } del f-string
         doc_nro_clean = _norm_cuit(req.doc_nro) if int(req.doc_tipo) == 80 else re.sub(r"\D+", "", str(req.doc_nro))
 
         soap = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -1656,7 +1774,6 @@ def wsfe_cae_endpoint(
     if AFIP_ENV not in ("prod", "homo"):
         raise HTTPException(status_code=500, detail="AFIP_ENV debe ser 'prod' o 'homo'")
 
-    # Contabilizamos request (sin tocar tu PLAN_LIMIT de PDFs)
     try:
         usage_total_increment(files_delta=0, requests_delta=1)
         usage_increment(files_delta=0, requests_delta=1)
@@ -1760,3 +1877,160 @@ def wsfe_pdf_endpoint(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+    # ============================================================
+# WSFE EMAIL (enviar comprobante PDF al cliente) ✅ NUEVO
+# ============================================================
+from email.mime.application import MIMEApplication
+
+class WsfeEmailRequest(BaseModel):
+    to_email: str
+    pdf_payload: WsfePdfRequest  # reutilizamos el mismo modelo del PDF
+
+
+def send_wsfe_pdf_email(to_email: str, pdf_bytes: bytes, filename: str, subject: str, text: str, html: str) -> Dict[str, Any]:
+    provider = (EMAIL_PROVIDER or "").strip().lower()
+
+    if not SMTP_FROM:
+        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
+
+    to_email = (to_email or "").strip()
+    if not to_email or "@" not in to_email:
+        raise RuntimeError("to_email inválido.")
+
+    # ----- RESEND -----
+    # attachments: [{filename, content(base64)}]
+    # Docs: content puede ser base64 y filename obligatorio. :contentReference[oaicite:0]{index=0}
+    if provider == "resend":
+        if not RESEND_API_KEY:
+            raise RuntimeError("Falta RESEND_API_KEY en variables de entorno.")
+        resend.api_key = RESEND_API_KEY
+
+        att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        params = {
+            "from": SMTP_FROM,
+            "to": [to_email],
+            "subject": subject,
+            "text": text,
+            "html": html,
+            "attachments": [
+                {"filename": filename, "content": att_b64},
+            ],
+        }
+        resp = resend.Emails.send(params)
+        return {"ok": True, "provider": "resend", "to": [to_email], "resend": resp}
+
+    # ----- BREVO API -----
+    # attachment: [{name, content(base64)}]  :contentReference[oaicite:1]{index=1}
+    if provider == "brevo":
+        if not BREVO_API_KEY:
+            raise RuntimeError("Falta BREVO_API_KEY en variables de entorno.")
+
+        from_name, from_email = _parse_from_name_email(SMTP_FROM)
+        if not from_email or "@" not in from_email:
+            raise RuntimeError("SMTP_FROM inválido. Formato: 'Nombre <email@dominio>' o 'email@dominio'.")
+
+        att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+        payload = {
+            "sender": {"name": from_name, "email": from_email},
+            "to": [{"email": to_email}],
+            "subject": subject,
+            "htmlContent": html,
+            "textContent": text,
+            "attachment": [
+                {"name": filename, "content": att_b64},
+            ],
+        }
+
+        r = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
+            json=payload,
+            timeout=25,
+        )
+        if r.status_code >= 300:
+            raise RuntimeError(f"Brevo API error {r.status_code}: {r.text[:800]}")
+        return {"ok": True, "provider": "brevo", "to": [to_email], "brevo": r.json()}
+
+    # ----- BREVO SMTP (o cualquier SMTP) -----
+    # Armamos MIME con adjunto PDF (MIMEApplication). :contentReference[oaicite:2]{index=2}
+    if provider == "brevo_smtp":
+        if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
+            raise RuntimeError("Faltan SMTP_HOST/SMTP_USER/SMTP_PASS para brevo_smtp.")
+
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_email
+
+        # Parte alternativa (texto + html)
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(text, "plain", "utf-8"))
+        alt.attach(MIMEText(html, "html", "utf-8"))
+        msg.attach(alt)
+
+        # Adjunto PDF
+        part = MIMEApplication(pdf_bytes, _subtype="pdf")
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
+
+        _, from_email = _parse_from_name_email(SMTP_FROM)
+        envelope_from = from_email if from_email and "@" in from_email else SMTP_FROM
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(envelope_from, [to_email], msg.as_string())
+
+        return {"ok": True, "provider": "brevo_smtp", "to": [to_email]}
+
+    raise RuntimeError(f"EMAIL_PROVIDER no soportado: {provider}. Usá 'resend', 'brevo' o 'brevo_smtp'.")
+
+
+@app.post("/wsfe/email")
+def wsfe_email_endpoint(
+    payload: WsfeEmailRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+
+    # Generamos el PDF con el mismo builder que /wsfe/pdf
+    pdf_bytes = _build_simple_invoice_pdf(payload.pdf_payload)
+
+    cuit = _norm_cuit(payload.pdf_payload.cuit)
+    filename = f"factura_{cuit}_{payload.pdf_payload.pto_vta}_{payload.pdf_payload.cbte_tipo}_{payload.pdf_payload.cbte_nro}.pdf"
+
+    subject = f"Comprobante electrónico - {cuit} - {payload.pdf_payload.cbte_nro}"
+    text = (
+        "Adjuntamos el comprobante electrónico (PDF).\n\n"
+        "Gracias por operar con LexaCAE.\n"
+    )
+    html = (
+        "<div style='font-family: Arial, sans-serif; line-height: 1.5;'>"
+        "<p>Adjuntamos el comprobante electrónico (PDF).</p>"
+        "<p>Gracias por operar con <b>LexaCAE</b>.</p>"
+        "</div>"
+    )
+
+    try:
+        # contabilizamos request (sin tocar plan de PDFs)
+        try:
+            usage_total_increment(files_delta=0, requests_delta=1)
+            usage_increment(files_delta=0, requests_delta=1)
+        except Exception:
+            pass
+
+        return send_wsfe_pdf_email(
+            to_email=payload.to_email,
+            pdf_bytes=pdf_bytes,
+            filename=filename,
+            subject=subject,
+            text=text,
+            html=html,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
