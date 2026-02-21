@@ -362,7 +362,15 @@ def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
 
 
 # ===================== WSFEv1 (FRONT CALLS) =====================
-def backend_tenant_upsert(base_url: str, api_key: str, access_token: str, cuit: str, cert_b64: str, key_b64: str, enabled: bool = True):
+def backend_tenant_upsert(
+    base_url: str,
+    api_key: str,
+    access_token: str,
+    cuit: str,
+    cert_b64: str,
+    key_b64: str,
+    enabled: bool = True,
+):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
         headers["X-API-Key"] = api_key
@@ -394,6 +402,40 @@ def backend_wsfe_cae(base_url: str, api_key: str, access_token: str, payload: di
     r = requests.post(f"{base_url}/wsfe/cae", headers=headers, json=payload, timeout=90)
     if r.status_code != 200:
         raise RuntimeError(f"WSFE CAE falló ({r.status_code}): {r.text}")
+    return r.json()
+
+
+def backend_wsfe_pdf(base_url: str, api_key: str, access_token: str, payload: dict, timeout_s: int = 60) -> bytes:
+    """
+    Genera y devuelve PDF del comprobante emitido.
+    Requiere endpoint backend: POST /wsfe/pdf  (application/pdf)
+    El backend debería usar los datos del payload/resp (CAE, cbte_nro, etc) para armar el PDF.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    r = requests.post(f"{base_url}/wsfe/pdf", headers=headers, json=payload, timeout=timeout_s)
+    if r.status_code != 200:
+        raise RuntimeError(f"WSFE PDF falló ({r.status_code}): {r.text}")
+    return r.content
+
+
+def backend_wsfe_send_email(base_url: str, api_key: str, access_token: str, payload: dict, timeout_s: int = 60) -> dict:
+    """
+    Envía el comprobante por email desde el backend (recomendado).
+    Requiere endpoint backend: POST /wsfe/email  (json)
+    payload esperado (sugerido):
+      - to_email
+      - pdf_payload (los datos para generar/adjuntar PDF)
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    r = requests.post(f"{base_url}/wsfe/email", headers=headers, json=payload, timeout=timeout_s)
+    if r.status_code != 200:
+        raise RuntimeError(f"WSFE email falló ({r.status_code}): {r.text}")
     return r.json()
 
 
@@ -480,7 +522,10 @@ if not st.session_state.auth["logged"]:
 # ===================== PÁGINA: VALIDACIÓN (TU LÓGICA INTACTA) =====================
 def render_validacion():
     # ===================== INFO GENERAL =====================
-    st.info("En una primera instancia detectamos el CAE y su vencimiento directamente desde el PDF cargado. Luego, validamos la información contra AFIP utilizando el servicio oficial WSCDC (ComprobanteConstatar).")
+    st.info(
+        "En una primera instancia detectamos el CAE y su vencimiento directamente desde el PDF cargado. "
+        "Luego, validamos la información contra AFIP utilizando el servicio oficial WSCDC (ComprobanteConstatar)."
+    )
 
     # ===================== PANEL: TOTAL REAL + EMAIL MENSUAL =====================
     st.subheader("Uso del plan")
@@ -526,7 +571,6 @@ def render_validacion():
         with colm2:
             st.metric("Requests (total)", total_requests)
         with colm3:
-            # ✅ queda igual que el mensual (YYYY-MM)
             st.metric("Mes", total_updated_at or "-")
 
         if plan_limit is not None:
@@ -559,7 +603,7 @@ def render_validacion():
         with colm3:
             st.metric("Mes", ym or "-")
 
-        cbtn1, cbtn2 = st.columns([1, 3])
+        cbtn1, _ = st.columns([1, 3])
         with cbtn1:
             if st.button("Enviar resumen por email", use_container_width=True):
                 try:
@@ -709,7 +753,6 @@ def render_validacion():
                 st.warning("No pudimos obtener resultados del servidor. Probá de nuevo en unos segundos.")
         except Exception as e:
             st.error(str(e))
-            # Si el error fue plan límite, mostrar CTA directo
             if "límite de su plan" in str(e).lower() or "plan_limit_reached" in str(e).lower():
                 st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
 
@@ -751,7 +794,10 @@ def render_validacion():
 
 # ===================== PÁGINA: FACTURACIÓN WSFEv1 =====================
 def render_facturacion():
-    st.info("Facturación (WSFEv1): emisión de comprobantes con CAE. Cada cliente emite con su CUIT y certificado. (El PDF lo generás vos; WSFE autoriza y devuelve CAE).")
+    st.info(
+        "Facturación (WSFEv1): emisión de comprobantes con CAE. "
+        "Cada cliente emite con su CUIT y certificado. (El PDF lo generás vos; WSFE autoriza y devuelve CAE)."
+    )
 
     st.subheader("1) Configurar emisor (CUIT + Certificado)")
     st.caption("Esto guarda/actualiza credenciales del cliente en el backend (tenant). Recomendado: que lo haga un admin/soporte.")
@@ -925,6 +971,81 @@ def render_facturacion():
                     mime="application/json",
                     use_container_width=True,
                 )
+
+                # ===================== PDF + ENVÍO (requiere endpoints nuevos en backend) =====================
+                if cae:
+                    st.divider()
+                    st.subheader("Comprobante (PDF)")
+
+                    pdf_name = (
+                        f"comprobante_{str(cuit_emit).strip()}_{int(pto_vta)}_{int(cbte_tipo)}_"
+                        f"{int(cbtenro) if cbtenro is not None else 'sinnro'}.pdf"
+                    )
+
+                    # Payload para PDF: request original + datos devueltos por AFIP
+                    pdf_payload = dict(payload)
+                    pdf_payload.update({
+                        "cbte_nro": cbtenro,
+                        "cae": cae,
+                        "cae_vto": cae_vto,
+                        "resultado": resp.get("resultado"),
+                    })
+
+                    colpdf1, colpdf2 = st.columns(2)
+                    with colpdf1:
+                        if st.button("Generar PDF", use_container_width=True, key="btn_wsfe_gen_pdf"):
+                            try:
+                                pdf_bytes = backend_wsfe_pdf(
+                                    base_url=BASE_URL,
+                                    api_key=st.session_state.auth["api_key"],
+                                    access_token=st.session_state.auth["access_token"],
+                                    payload=pdf_payload,
+                                    timeout_s=60,
+                                )
+                                st.session_state.wsfe_pdf_bytes = pdf_bytes
+                                st.session_state.wsfe_pdf_name = pdf_name
+                                st.success("PDF generado.")
+                            except Exception as e:
+                                st.error(str(e))
+
+                    with colpdf2:
+                        pdf_bytes_ss = st.session_state.get("wsfe_pdf_bytes")
+                        pdf_name_ss = st.session_state.get("wsfe_pdf_name") or pdf_name
+                        if pdf_bytes_ss:
+                            st.download_button(
+                                "Descargar PDF",
+                                data=pdf_bytes_ss,
+                                file_name=pdf_name_ss,
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key="btn_wsfe_dl_pdf",
+                            )
+                        else:
+                            st.caption("Primero generá el PDF para habilitar la descarga.")
+
+                    st.subheader("Enviar al cliente")
+                    to_email = st.text_input("Email destinatario", placeholder="cliente@dominio.com", key="wsfe_to_email")
+
+                    colmail1, colmail2 = st.columns(2)
+                    with colmail1:
+                        if st.button("Enviar PDF por email", use_container_width=True, key="btn_wsfe_send_email"):
+                            try:
+                                if not (to_email or "").strip():
+                                    raise RuntimeError("Ingresá un email destinatario.")
+                                mail_payload = {"to_email": to_email.strip(), "pdf_payload": pdf_payload}
+                                resp_mail = backend_wsfe_send_email(
+                                    base_url=BASE_URL,
+                                    api_key=st.session_state.auth["api_key"],
+                                    access_token=st.session_state.auth["access_token"],
+                                    payload=mail_payload,
+                                    timeout_s=60,
+                                )
+                                st.success("Email enviado (backend).")
+                                st.json(resp_mail)
+                            except Exception as e:
+                                st.error(str(e))
+                    with colmail2:
+                        st.caption("Requiere endpoint backend **POST /wsfe/email** + SMTP configurado en el backend.")
 
             except Exception as e:
                 st.error(str(e))
