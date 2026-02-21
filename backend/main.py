@@ -1329,6 +1329,9 @@ def wsfe_cae_solicitar(req: WsfeCaeRequest) -> Dict[str, Any]:
             {''.join(iva_items)}
           </fe:Iva>"""
 
+        # ✅ doc nro limpio (evita backslash dentro del f-string)
+        doc_nro_clean = _norm_cuit(req.doc_nro) if int(req.doc_tipo) == 80 else re.sub(r"\D+", "", str(req.doc_nro))
+
         soap = f"""<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:fe="{WSFE_NS}">
   <soap:Body>
@@ -1348,7 +1351,7 @@ def wsfe_cae_solicitar(req: WsfeCaeRequest) -> Dict[str, Any]:
           <fe:FECAEDetRequest>
             <fe:Concepto>{int(req.concepto)}</fe:Concepto>
             <fe:DocTipo>{int(req.doc_tipo)}</fe:DocTipo>
-            <fe:DocNro>{_norm_cuit(req.doc_nro) if int(req.doc_tipo)==80 else re.sub(r"\\D+","",str(req.doc_nro))}</fe:DocNro>
+            <fe:DocNro>{doc_nro_clean}</fe:DocNro>
             <fe:CbteDesde>{int(next_nro)}</fe:CbteDesde>
             <fe:CbteHasta>{int(next_nro)}</fe:CbteHasta>
             <fe:CbteFch>{str(req.cbte_fch).strip()}</fe:CbteFch>
