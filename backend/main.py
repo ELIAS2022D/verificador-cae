@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import threading
 import sqlite3
+import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -26,8 +28,8 @@ import ssl
 from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 
-from fastapi import FastAPI, Header, HTTPException, UploadFile, File
-from fastapi.responses import Response
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Request
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel, Field
 
 # ===== Email (Resend + Brevo) =====
@@ -47,9 +49,37 @@ from reportlab.lib.units import mm
 
 
 # ============================================================
+# LOGGING (pro - sin tocar lógica)
+# ============================================================
+LOG_LEVEL = (os.getenv("LOG_LEVEL", "INFO") or "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("lexacae-backend")
+
+
+# ============================================================
 # FASTAPI
 # ============================================================
-app = FastAPI(title="Verificador CAE Backend", version="1.0.0")
+app = FastAPI(
+    title="LexaCAE Backend",
+    version="1.0.0",
+    description="Validación CAE (WSCDC) + Emisión WSFEv1 + PDF + Email",
+)
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    rid = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    response = await call_next(request)
+    response.headers["X-Request-Id"] = rid
+    response.headers["X-App-Version"] = app.version
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Mantengo simple: log + 500 genérico (no cambia lógica funcional, solo evita "traceback crudo")
+    logger.exception("unhandled")
+    return JSONResponse(status_code=500, content={"detail": "Error interno"})
 
 
 # ============================================================
@@ -81,7 +111,11 @@ def check_bearer(authorization: str):
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    try:
+        _sqlite_init()
+        return {"ok": True, "env": (os.getenv("AFIP_ENV", "prod") or "prod")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/auth/login")
@@ -343,7 +377,7 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
     requests_count = int(usage.get("requests_count", 0) or 0)
     updated_at = usage.get("updated_at") or "-"
 
-    subject = f"Resumen de uso - {ym} (Verificador CAE)"
+    subject = f"Resumen de uso - {ym} (LexaCAE)"
 
     text = (
         f"Resumen de uso - {ym}\n"
@@ -437,146 +471,6 @@ def usage_email_endpoint(x_api_key: str = Header(default=""), authorization: str
 
 
 # ============================================================
-# ✅ NUEVO: WSFE EMAIL (PDF adjunto) — requerido por tu FRONT
-# ============================================================
-class WsfeEmailRequest(BaseModel):
-    to_email: str
-    pdf_payload: Dict[str, Any]  # incluye lo que usa /wsfe/pdf
-
-
-def _send_email_with_pdf_smtp(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
-    if not SMTP_FROM:
-        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
-        raise RuntimeError("Faltan SMTP_HOST/SMTP_USER/SMTP_PASS para enviar adjuntos por SMTP.")
-
-    msg = MIMEMultipart("mixed")
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = to_email
-
-    alt = MIMEMultipart("alternative")
-    alt.attach(MIMEText(text, "plain", "utf-8"))
-    alt.attach(MIMEText(html, "html", "utf-8"))
-    msg.attach(alt)
-
-    part = MIMEBase("application", "pdf")
-    part.set_payload(pdf_bytes)
-    encoders.encode_base64(part)
-    part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
-    msg.attach(part)
-
-    _, from_email = _parse_from_name_email(SMTP_FROM)
-    envelope_from = from_email if from_email and "@" in from_email else SMTP_FROM
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(envelope_from, [to_email], msg.as_string())
-
-
-def _send_email_with_pdf_brevo_api(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
-    if not BREVO_API_KEY:
-        raise RuntimeError("Falta BREVO_API_KEY en variables de entorno.")
-    if not SMTP_FROM:
-        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
-
-    from_name, from_email = _parse_from_name_email(SMTP_FROM)
-    if not from_email or "@" not in from_email:
-        raise RuntimeError("SMTP_FROM inválido. Formato: 'Nombre <email@dominio>' o 'email@dominio'.")
-
-    att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-    payload = {
-        "sender": {"name": from_name, "email": from_email},
-        "to": [{"email": to_email}],
-        "subject": subject,
-        "htmlContent": html,
-        "textContent": text,
-        "attachment": [{"content": att_b64, "name": filename}],
-    }
-
-    r = requests.post(
-        "https://api.brevo.com/v3/smtp/email",
-        headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
-        json=payload,
-        timeout=30,
-    )
-    if r.status_code >= 300:
-        raise RuntimeError(f"Brevo API error {r.status_code}: {r.text[:1200]}")
-    return r.json()
-
-
-@app.post("/wsfe/email")
-def wsfe_email_endpoint(
-    payload: WsfeEmailRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
-    """
-    Requerido por el FRONT:
-      POST /wsfe/email
-      { "to_email": "...", "pdf_payload": { ... } }
-
-    - Genera el PDF usando /wsfe/pdf internamente
-    - Envía mail con PDF adjunto
-    """
-    check_api_key(x_api_key)
-    check_bearer(authorization)
-
-    to_email = (payload.to_email or "").strip()
-    if not to_email or "@" not in to_email:
-        raise HTTPException(status_code=400, detail="to_email inválido.")
-
-    # Generar PDF usando el mismo builder para evitar duplicación
-    try:
-        pdf_req = WsfePdfRequest(**(payload.pdf_payload or {}))
-        pdf_bytes = _build_simple_invoice_pdf(pdf_req)
-        filename = f"factura_{_norm_cuit(pdf_req.cuit)}_{pdf_req.pto_vta}_{pdf_req.cbte_tipo}_{pdf_req.cbte_nro}.pdf"
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"pdf_payload inválido o incompleto: {e}")
-
-    subject = "Comprobante electrónico (LexaCAE)"
-    text = (
-        "Adjuntamos el comprobante electrónico.\n\n"
-        "Si necesitás ayuda o reenvío, respondé a este correo.\n"
-    )
-    html = (
-        "<div style='font-family: Arial, sans-serif; line-height:1.5'>"
-        "<h3>Comprobante electrónico</h3>"
-        "<p>Adjuntamos el comprobante electrónico en PDF.</p>"
-        "<p>Si necesitás ayuda o reenvío, respondé a este correo.</p>"
-        "</div>"
-    )
-
-    provider = (EMAIL_PROVIDER or "").strip().lower()
-
-    # contabilizar request (no toca PLAN_LIMIT de PDFs)
-    try:
-        usage_total_increment(files_delta=0, requests_delta=1)
-        usage_increment(files_delta=0, requests_delta=1)
-    except Exception:
-        pass
-
-    try:
-        if provider == "brevo_smtp":
-            _send_email_with_pdf_smtp(to_email, subject, text, html, pdf_bytes, filename)
-            return {"ok": True, "provider": "brevo_smtp", "to": to_email, "filename": filename}
-
-        if provider == "brevo":
-            resp = _send_email_with_pdf_brevo_api(to_email, subject, text, html, pdf_bytes, filename)
-            return {"ok": True, "provider": "brevo", "to": to_email, "filename": filename, "brevo": resp}
-
-        # Resend con adjuntos: no lo implemento acá para no dejarte algo “a medias” que falle en prod.
-        if provider == "resend":
-            raise RuntimeError("Para enviar PDF adjunto, configurá EMAIL_PROVIDER=brevo_smtp o EMAIL_PROVIDER=brevo.")
-
-        raise RuntimeError(f"EMAIL_PROVIDER no soportado para adjuntos: {provider}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============================================================
 # PDF -> IMAGEN / QR / OCR
 # ============================================================
 def _pdf_page_to_png_bytes(pdf_bytes: bytes, page_index: int = 0, dpi: int = 220) -> bytes:
@@ -601,6 +495,7 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
                 raw = c.data.decode("utf-8", "ignore").strip()
                 if raw.startswith("http") and "p=" in raw:
                     from urllib.parse import urlparse, parse_qs
+
                     parsed = urlparse(raw)
                     qs = parse_qs(parsed.query)
                     p = (qs.get("p") or [None])[0]
@@ -611,6 +506,7 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
                     payload_b64 = p + pad
                     payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore")
                     import json
+
                     data = json.loads(payload_json)
                     if isinstance(data, dict) and data:
                         return data
@@ -715,7 +611,7 @@ def find_first(patterns, text: str) -> Optional[str]:
             return m.group(1)
     idx = text.lower().find("cae")
     if idx != -1:
-        window = text[idx: idx + 250]
+        window = text[idx : idx + 250]
         m2 = re.search(r"(\d{14})", window)
         if m2:
             return m2.group(1)
@@ -949,7 +845,7 @@ def _run_openssl(cmd: List[str]) -> None:
         raise RuntimeError(f"OpenSSL error: {e.stderr.decode('utf-8', 'ignore')}")
 
 
-def normalize_cert_key_to_pem(cert_bytes: bytes, key_bytes: bytes) -> tuple[bytes, bytes]:
+def normalize_cert_key_to_pem(cert_bytes: bytes, key_bytes: bytes) -> Tuple[bytes, bytes]:
     cert_is_pem = b"BEGIN CERTIFICATE" in cert_bytes
     key_is_pem = b"BEGIN" in key_bytes
     if cert_is_pem and key_is_pem:
@@ -1001,12 +897,19 @@ def sign_tra_with_openssl(tra_xml: str, cert_pem: bytes, key_pem: bytes) -> byte
             f.write(tra_xml.encode("utf-8"))
 
         cmd = [
-            "openssl", "smime", "-sign",
-            "-signer", cert_path,
-            "-inkey", key_path,
-            "-in", tra_path,
-            "-out", out_path,
-            "-outform", "DER",
+            "openssl",
+            "smime",
+            "-sign",
+            "-signer",
+            cert_path,
+            "-inkey",
+            key_path,
+            "-in",
+            tra_path,
+            "-out",
+            out_path,
+            "-outform",
+            "DER",
             "-nodetach",
             "-binary",
         ]
@@ -1316,16 +1219,25 @@ async def verify(
                     doc_tipo_rec, doc_nro_rec = None, None
 
             missing = []
-            if cbte_tipo is None: missing.append("CbteTipo")
-            if pto_vta is None: missing.append("PtoVta")
-            if cbte_nro is None: missing.append("CbteNro")
-            if not cbte_fch_yyyymmdd: missing.append("CbteFch")
-            if not cae_pdf: missing.append("CAE")
-            if imp_total is None: missing.append("ImpTotal")
-            if not cuit_emisor: missing.append("CuitEmisor(PDF/QR)")
+            if cbte_tipo is None:
+                missing.append("CbteTipo")
+            if pto_vta is None:
+                missing.append("PtoVta")
+            if cbte_nro is None:
+                missing.append("CbteNro")
+            if not cbte_fch_yyyymmdd:
+                missing.append("CbteFch")
+            if not cae_pdf:
+                missing.append("CAE")
+            if imp_total is None:
+                missing.append("ImpTotal")
+            if not cuit_emisor:
+                missing.append("CuitEmisor(PDF/QR)")
             if require_receptor:
-                if not doc_tipo_rec: missing.append("DocTipoReceptor")
-                if not doc_nro_rec: missing.append("DocNroReceptor")
+                if not doc_tipo_rec:
+                    missing.append("DocTipoReceptor")
+                if not doc_nro_rec:
+                    missing.append("DocNroReceptor")
 
             if missing:
                 out_rows.append(
@@ -1878,115 +1790,101 @@ def wsfe_pdf_endpoint(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
-    # ============================================================
-# WSFE EMAIL (enviar comprobante PDF al cliente) ✅ NUEVO
-# ============================================================
-from email.mime.application import MIMEApplication
 
+# ============================================================
+# WSFE EMAIL (enviar comprobante PDF al cliente)
+#   - UNIFICADO (sin duplicados) ✅
+#   - Mantiene el contrato que usa tu FRONT:
+#       { "to_email": "...", "pdf_payload": { ... } }
+# ============================================================
 class WsfeEmailRequest(BaseModel):
     to_email: str
-    pdf_payload: WsfePdfRequest  # reutilizamos el mismo modelo del PDF
+    pdf_payload: Dict[str, Any]  # el front manda dict
 
 
-def send_wsfe_pdf_email(to_email: str, pdf_bytes: bytes, filename: str, subject: str, text: str, html: str) -> Dict[str, Any]:
-    provider = (EMAIL_PROVIDER or "").strip().lower()
+def _send_email_with_pdf_smtp(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
+    if not SMTP_FROM:
+        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
+        raise RuntimeError("Faltan SMTP_HOST/SMTP_USER/SMTP_PASS para enviar adjuntos por SMTP.")
 
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text, "plain", "utf-8"))
+    alt.attach(MIMEText(html, "html", "utf-8"))
+    msg.attach(alt)
+
+    part = MIMEBase("application", "pdf")
+    part.set_payload(pdf_bytes)
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+    msg.attach(part)
+
+    _, from_email = _parse_from_name_email(SMTP_FROM)
+    envelope_from = from_email if from_email and "@" in from_email else SMTP_FROM
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.sendmail(envelope_from, [to_email], msg.as_string())
+
+
+def _send_email_with_pdf_brevo_api(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
+    if not BREVO_API_KEY:
+        raise RuntimeError("Falta BREVO_API_KEY en variables de entorno.")
     if not SMTP_FROM:
         raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
 
-    to_email = (to_email or "").strip()
-    if not to_email or "@" not in to_email:
-        raise RuntimeError("to_email inválido.")
+    from_name, from_email = _parse_from_name_email(SMTP_FROM)
+    if not from_email or "@" not in from_email:
+        raise RuntimeError("SMTP_FROM inválido. Formato: 'Nombre <email@dominio>' o 'email@dominio'.")
 
-    # ----- RESEND -----
-    # attachments: [{filename, content(base64)}]
-    # Docs: content puede ser base64 y filename obligatorio. :contentReference[oaicite:0]{index=0}
-    if provider == "resend":
-        if not RESEND_API_KEY:
-            raise RuntimeError("Falta RESEND_API_KEY en variables de entorno.")
-        resend.api_key = RESEND_API_KEY
+    att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    payload = {
+        "sender": {"name": from_name, "email": from_email},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "htmlContent": html,
+        "textContent": text,
+        "attachment": [{"content": att_b64, "name": filename}],
+    }
 
-        att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-        params = {
-            "from": SMTP_FROM,
-            "to": [to_email],
-            "subject": subject,
-            "text": text,
-            "html": html,
-            "attachments": [
-                {"filename": filename, "content": att_b64},
-            ],
-        }
-        resp = resend.Emails.send(params)
-        return {"ok": True, "provider": "resend", "to": [to_email], "resend": resp}
+    r = requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Brevo API error {r.status_code}: {r.text[:1200]}")
+    return r.json()
 
-    # ----- BREVO API -----
-    # attachment: [{name, content(base64)}]  :contentReference[oaicite:1]{index=1}
-    if provider == "brevo":
-        if not BREVO_API_KEY:
-            raise RuntimeError("Falta BREVO_API_KEY en variables de entorno.")
 
-        from_name, from_email = _parse_from_name_email(SMTP_FROM)
-        if not from_email or "@" not in from_email:
-            raise RuntimeError("SMTP_FROM inválido. Formato: 'Nombre <email@dominio>' o 'email@dominio'.")
+def _send_email_with_pdf_resend(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
+    if not RESEND_API_KEY:
+        raise RuntimeError("Falta RESEND_API_KEY en variables de entorno.")
+    if not SMTP_FROM:
+        raise RuntimeError("Falta SMTP_FROM en variables de entorno.")
 
-        att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    resend.api_key = RESEND_API_KEY
+    att_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
-        payload = {
-            "sender": {"name": from_name, "email": from_email},
-            "to": [{"email": to_email}],
-            "subject": subject,
-            "htmlContent": html,
-            "textContent": text,
-            "attachment": [
-                {"name": filename, "content": att_b64},
-            ],
-        }
-
-        r = requests.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
-            json=payload,
-            timeout=25,
-        )
-        if r.status_code >= 300:
-            raise RuntimeError(f"Brevo API error {r.status_code}: {r.text[:800]}")
-        return {"ok": True, "provider": "brevo", "to": [to_email], "brevo": r.json()}
-
-    # ----- BREVO SMTP (o cualquier SMTP) -----
-    # Armamos MIME con adjunto PDF (MIMEApplication). :contentReference[oaicite:2]{index=2}
-    if provider == "brevo_smtp":
-        if not SMTP_HOST or not SMTP_USER or not SMTP_PASS:
-            raise RuntimeError("Faltan SMTP_HOST/SMTP_USER/SMTP_PASS para brevo_smtp.")
-
-        msg = MIMEMultipart("mixed")
-        msg["Subject"] = subject
-        msg["From"] = SMTP_FROM
-        msg["To"] = to_email
-
-        # Parte alternativa (texto + html)
-        alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(text, "plain", "utf-8"))
-        alt.attach(MIMEText(html, "html", "utf-8"))
-        msg.attach(alt)
-
-        # Adjunto PDF
-        part = MIMEApplication(pdf_bytes, _subtype="pdf")
-        part.add_header("Content-Disposition", "attachment", filename=filename)
-        msg.attach(part)
-
-        _, from_email = _parse_from_name_email(SMTP_FROM)
-        envelope_from = from_email if from_email and "@" in from_email else SMTP_FROM
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=25) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(envelope_from, [to_email], msg.as_string())
-
-        return {"ok": True, "provider": "brevo_smtp", "to": [to_email]}
-
-    raise RuntimeError(f"EMAIL_PROVIDER no soportado: {provider}. Usá 'resend', 'brevo' o 'brevo_smtp'.")
+    params = {
+        "from": SMTP_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "text": text,
+        "html": html,
+        # Resend: attachments -> [{filename, content(base64)}]
+        "attachments": [{"filename": filename, "content": att_b64}],
+    }
+    resp = resend.Emails.send(params)
+    return resp
 
 
 @app.post("/wsfe/email")
@@ -1995,42 +1893,64 @@ def wsfe_email_endpoint(
     x_api_key: str = Header(default=""),
     authorization: str = Header(default=""),
 ):
+    """
+    Requerido por el FRONT:
+      POST /wsfe/email
+      { "to_email": "...", "pdf_payload": { ... } }
+
+    - Genera el PDF usando el mismo builder de /wsfe/pdf
+    - Envía mail con PDF adjunto (resend / brevo / brevo_smtp)
+    """
     check_api_key(x_api_key)
     check_bearer(authorization)
 
-    # Generamos el PDF con el mismo builder que /wsfe/pdf
-    pdf_bytes = _build_simple_invoice_pdf(payload.pdf_payload)
+    to_email = (payload.to_email or "").strip()
+    if not to_email or "@" not in to_email:
+        raise HTTPException(status_code=400, detail="to_email inválido.")
 
-    cuit = _norm_cuit(payload.pdf_payload.cuit)
-    filename = f"factura_{cuit}_{payload.pdf_payload.pto_vta}_{payload.pdf_payload.cbte_tipo}_{payload.pdf_payload.cbte_nro}.pdf"
+    # Generar PDF (validando payload)
+    try:
+        pdf_req = WsfePdfRequest(**(payload.pdf_payload or {}))
+        pdf_bytes = _build_simple_invoice_pdf(pdf_req)
+        filename = f"factura_{_norm_cuit(pdf_req.cuit)}_{pdf_req.pto_vta}_{pdf_req.cbte_tipo}_{pdf_req.cbte_nro}.pdf"
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"pdf_payload inválido o incompleto: {e}")
 
-    subject = f"Comprobante electrónico - {cuit} - {payload.pdf_payload.cbte_nro}"
+    subject = "Comprobante electrónico (LexaCAE)"
     text = (
-        "Adjuntamos el comprobante electrónico (PDF).\n\n"
-        "Gracias por operar con LexaCAE.\n"
+        "Adjuntamos el comprobante electrónico.\n\n"
+        "Si necesitás ayuda o reenvío, respondé a este correo.\n"
     )
     html = (
-        "<div style='font-family: Arial, sans-serif; line-height: 1.5;'>"
-        "<p>Adjuntamos el comprobante electrónico (PDF).</p>"
-        "<p>Gracias por operar con <b>LexaCAE</b>.</p>"
+        "<div style='font-family: Arial, sans-serif; line-height:1.5'>"
+        "<h3>Comprobante electrónico</h3>"
+        "<p>Adjuntamos el comprobante electrónico en PDF.</p>"
+        "<p>Si necesitás ayuda o reenvío, respondé a este correo.</p>"
         "</div>"
     )
 
-    try:
-        # contabilizamos request (sin tocar plan de PDFs)
-        try:
-            usage_total_increment(files_delta=0, requests_delta=1)
-            usage_increment(files_delta=0, requests_delta=1)
-        except Exception:
-            pass
+    provider = (EMAIL_PROVIDER or "").strip().lower()
 
-        return send_wsfe_pdf_email(
-            to_email=payload.to_email,
-            pdf_bytes=pdf_bytes,
-            filename=filename,
-            subject=subject,
-            text=text,
-            html=html,
-        )
+    # contabilizar request (no toca PLAN_LIMIT de PDFs)
+    try:
+        usage_total_increment(files_delta=0, requests_delta=1)
+        usage_increment(files_delta=0, requests_delta=1)
+    except Exception:
+        pass
+
+    try:
+        if provider == "brevo_smtp":
+            _send_email_with_pdf_smtp(to_email, subject, text, html, pdf_bytes, filename)
+            return {"ok": True, "provider": "brevo_smtp", "to": to_email, "filename": filename}
+
+        if provider == "brevo":
+            resp = _send_email_with_pdf_brevo_api(to_email, subject, text, html, pdf_bytes, filename)
+            return {"ok": True, "provider": "brevo", "to": to_email, "filename": filename, "brevo": resp}
+
+        if provider == "resend":
+            resp = _send_email_with_pdf_resend(to_email, subject, text, html, pdf_bytes, filename)
+            return {"ok": True, "provider": "resend", "to": to_email, "filename": filename, "resend": resp}
+
+        raise RuntimeError(f"EMAIL_PROVIDER no soportado para adjuntos: {provider}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

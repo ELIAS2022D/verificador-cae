@@ -45,13 +45,14 @@ icon = Image.open("assets/logo_Sitio.png")
 
 st.set_page_config(
     page_title="LexaCAE | Verificador CAE",
-    page_icon=icon,   # ✅ así sí se ve
+    page_icon=icon,
     layout="wide",
 )
 
 # Header con logo + nombre
 col1, col2 = st.columns([1, 2])
 with col1:
+    # Si en mobile se rompe, igual lo dejamos porque vos lo querías grande.
     st.image("assets/favicon.png", width=600)
 with col2:
     st.markdown("## Validación en la nube.")
@@ -254,7 +255,9 @@ def basic_format_ok(cae: str) -> bool:
     return bool(cae and re.fullmatch(r"\d{14}", cae))
 
 
-def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
+@st.cache_data(show_spinner=False)
+def extract_text_pdf_cached(file_bytes: bytes, max_pages: int = 5) -> str:
+    # Cachea la extracción para no recalcular en cada rerun
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         texts = []
         for page in pdf.pages[:max_pages]:
@@ -305,9 +308,9 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
         files=files,
         timeout=timeout_s,
     )
-    # 🔥 Si el backend bloquea por plan, devolvemos un error más amigable
+
     if r.status_code != 200:
-        # Intentar parsear JSON con code PLAN_LIMIT_REACHED
+        # Intentar parsear JSON para error semántico del backend (PLAN_LIMIT_REACHED u otros)
         try:
             j = r.json()
             detail = j.get("detail", j)
@@ -316,10 +319,11 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
                 limit = detail.get("limit")
                 msg = detail.get("message") or "Ha alcanzado el límite de su plan."
                 raise RuntimeError(f"{msg} (Usadas: {used} / Límite: {limit})")
-        except Exception:
-            pass
-
-        raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
+            # Si hay JSON pero no es ese code, lo devolvemos igual (mejor debug)
+            raise RuntimeError(f"Verify falló ({r.status_code}): {detail}")
+        except ValueError:
+            # No es JSON
+            raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
 
     return r.json()
 
@@ -334,7 +338,6 @@ def backend_usage_current(base_url: str, api_key: str, access_token: str):
     return r.json()
 
 
-# ✅ NUEVO: total real (bolsa) desde el backend
 def backend_usage_total(base_url: str, api_key: str, access_token: str):
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
@@ -346,15 +349,9 @@ def backend_usage_total(base_url: str, api_key: str, access_token: str):
 
 
 def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
-    """
-    Dispara el envío del reporte por email desde el BACKEND.
-    El backend debe tener implementado: POST /usage/email
-    y usar SMTP_* + CLIENT_REPORT_EMAIL desde ENV VARS en Render.
-    """
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
         headers["X-API-Key"] = api_key
-
     r = requests.post(f"{base_url}/usage/email", headers=headers, timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"Enviar email falló ({r.status_code}): {r.text}")
@@ -406,11 +403,6 @@ def backend_wsfe_cae(base_url: str, api_key: str, access_token: str, payload: di
 
 
 def backend_wsfe_pdf(base_url: str, api_key: str, access_token: str, payload: dict, timeout_s: int = 60) -> bytes:
-    """
-    Genera y devuelve PDF del comprobante emitido.
-    Requiere endpoint backend: POST /wsfe/pdf  (application/pdf)
-    El backend debería usar los datos del payload/resp (CAE, cbte_nro, etc) para armar el PDF.
-    """
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
         headers["X-API-Key"] = api_key
@@ -422,13 +414,6 @@ def backend_wsfe_pdf(base_url: str, api_key: str, access_token: str, payload: di
 
 
 def backend_wsfe_send_email(base_url: str, api_key: str, access_token: str, payload: dict, timeout_s: int = 60) -> dict:
-    """
-    Envía el comprobante por email desde el backend (recomendado).
-    Requiere endpoint backend: POST /wsfe/email  (json)
-    payload esperado (sugerido):
-      - to_email
-      - pdf_payload (los datos para generar/adjuntar PDF)
-    """
     headers = {"Authorization": f"Bearer {access_token}"}
     if api_key:
         headers["X-API-Key"] = api_key
@@ -457,6 +442,7 @@ def _wa_renew_url() -> str:
 # ===================== SIDEBAR: LOGIN + NAV =====================
 with st.sidebar:
     st.subheader("Acceso")
+
     api_key = st.session_state.auth["api_key"]
 
     cuit_login = st.text_input(
@@ -492,7 +478,7 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    # navegación (solo si está logueado)
+
     if st.session_state.auth["logged"]:
         page = st.radio("Secciones", ["Validación", "Facturación (WSFEv1)"], horizontal=False)
     else:
@@ -519,15 +505,13 @@ if not st.session_state.auth["logged"]:
     st.stop()
 
 
-# ===================== PÁGINA: VALIDACIÓN (TU LÓGICA INTACTA) =====================
+# ===================== PÁGINA: VALIDACIÓN =====================
 def render_validacion():
-    # ===================== INFO GENERAL =====================
     st.info(
         "En una primera instancia detectamos el CAE y su vencimiento directamente desde el PDF cargado. "
         "Luego, validamos la información contra AFIP utilizando el servicio oficial WSCDC (ComprobanteConstatar)."
     )
 
-    # ===================== PANEL: TOTAL REAL + EMAIL MENSUAL =====================
     st.subheader("Uso del plan")
 
     plan_used = None
@@ -539,13 +523,11 @@ def render_validacion():
         s = (s or "").strip()
         if not s:
             return ""
-        # ISO típico: 2026-02-05T20:07:49.025060+00:00  ->  2026-02
         if len(s) >= 7 and s[4] == "-":
             return s[:7]
         return s
 
     try:
-        # ✅ TOTAL REAL (bolsa)
         usage_total = backend_usage_total(
             base_url=BASE_URL,
             api_key=st.session_state.auth["api_key"],
@@ -557,7 +539,6 @@ def render_validacion():
         total_updated_at_raw = usage_total.get("updated_at", "") or ""
         total_updated_at = _fmt_yyyy_mm_from_iso(total_updated_at_raw)
 
-        # Límite del plan (solo para UI; el bloqueo real lo hace el backend)
         FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
         plan_used = total_files
         plan_limit = FRONT_PLAN_LIMIT
@@ -582,7 +563,6 @@ def render_validacion():
     except Exception:
         st.warning("No pudimos obtener el uso TOTAL en este momento. Probá nuevamente en unos segundos.")
 
-    # ✅ Mantengo tu sección de email mensual (sin tocar lógica)
     st.subheader("Resumen de uso del mes")
 
     try:
@@ -621,7 +601,6 @@ def render_validacion():
 
     st.divider()
 
-    # ===================== CARGA ARCHIVOS =====================
     st.subheader("Carga de facturas")
 
     help_text = "sin límite" if MAX_FILES is None else f"hasta {MAX_FILES}"
@@ -658,7 +637,6 @@ def render_validacion():
             except zipfile.BadZipFile:
                 st.error("ZIP inválido o dañado.")
 
-    # ===================== PREVALIDACIÓN LOCAL =====================
     rows = []
     if pdf_files:
         today = datetime.now().date()
@@ -666,7 +644,7 @@ def render_validacion():
 
         for i, f in enumerate(pdf_files, start=1):
             try:
-                text = extract_text_pdf(f["bytes"], max_pages=5)
+                text = extract_text_pdf_cached(f["bytes"], max_pages=5)
                 cae = find_first(CAE_PATTERNS, text)
                 vto_raw = find_first(VTO_PATTERNS, text)
                 vto_date = parse_date(vto_raw)
@@ -714,12 +692,10 @@ def render_validacion():
     st.subheader("Vista previa PDF cargados")
     st.dataframe(df, use_container_width=True)
 
-    # ===================== VALIDACIÓN AFIP VIA BACKEND =====================
     st.subheader("Validación contra AFIP")
     st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
     st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDF (ajustable).")
 
-    # ✅ Bloqueo visual: si el front conoce el plan y está vencido, deshabilita el botón.
     button_disabled = bool(plan_blocked)
 
     if st.button("Validar ahora", use_container_width=True, disabled=button_disabled, key="btn_validar"):
@@ -756,13 +732,10 @@ def render_validacion():
             if "límite de su plan" in str(e).lower() or "plan_limit_reached" in str(e).lower():
                 st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
 
-    # ===================== EXPORTS (CSV + XLSX) =====================
     if not df.empty:
-        # CAE como texto (evitar notación científica en Excel)
         if "CAE" in df.columns:
             df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
 
-        # limpiar saltos
         if "Estado" in df.columns:
             df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
@@ -833,11 +806,16 @@ def render_facturacion():
     st.subheader("2) Emitir comprobante (FECAESolicitar)")
     st.caption("MVP: se envían importes + receptor. Para productos/ítems, los manejás internamente (WSFEv1 trabaja por totales).")
 
-    # Defaults razonables para Argentina
     cuit_emit = st.text_input("CUIT emisor (tenant)", value=cuit_tenant or "", key="emit_cuit")
     pto_vta = st.number_input("Punto de venta", min_value=1, max_value=99999, value=1, step=1, key="emit_ptovta")
     cbte_tipo = st.number_input("Tipo comprobante (ej: 11=Factura C / 1=Factura A / 6=Factura B)", min_value=1, max_value=999, value=11, step=1, key="emit_tipo")
-    concepto = st.selectbox("Concepto", options=[1, 2, 3], index=0, format_func=lambda x: {1: "1 - Productos", 2: "2 - Servicios", 3: "3 - Prod y Serv"}[x], key="emit_conc")
+    concepto = st.selectbox(
+        "Concepto",
+        options=[1, 2, 3],
+        index=0,
+        format_func=lambda x: {1: "1 - Productos", 2: "2 - Servicios", 3: "3 - Prod y Serv"}[x],
+        key="emit_conc",
+    )
 
     colr1, colr2 = st.columns(2)
     with colr1:
@@ -871,7 +849,6 @@ def render_facturacion():
     with colmo2:
         mon_ctz = st.number_input("MonCotiz", min_value=0.000001, value=1.0, step=0.1, key="emit_monctz")
 
-    # IVA opcional (simple)
     st.markdown("**IVA (opcional)**")
     st.caption("Si usás Factura A/B normalmente cargás alícuotas. Si emitís C, suele ir 0.")
     use_iva = st.checkbox("Cargar alícuotas de IVA", value=False, key="emit_use_iva")
@@ -962,7 +939,6 @@ def render_facturacion():
                 if cbtenro is not None:
                     st.metric("Nro Comprobante", cbtenro)
 
-                # Descarga de la respuesta (útil para auditoría)
                 raw_json = (pd.Series(resp).to_json(orient="index", force_ascii=False)).encode("utf-8")
                 st.download_button(
                     "Descargar respuesta (JSON)",
@@ -972,7 +948,6 @@ def render_facturacion():
                     use_container_width=True,
                 )
 
-                # ===================== PDF + ENVÍO (requiere endpoints nuevos en backend) =====================
                 if cae:
                     st.divider()
                     st.subheader("Comprobante (PDF)")
@@ -982,7 +957,6 @@ def render_facturacion():
                         f"{int(cbtenro) if cbtenro is not None else 'sinnro'}.pdf"
                     )
 
-                    # Payload para PDF: request original + datos devueltos por AFIP
                     pdf_payload = dict(payload)
                     pdf_payload.update({
                         "cbte_nro": cbtenro,
