@@ -47,6 +47,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 
+# ✅ Password hashing (para perfil + cambio contraseña sin tocar envs)
+from passlib.context import CryptContext
 
 # ============================================================
 # LOGGING (pro - sin tocar lógica)
@@ -55,6 +57,7 @@ LOG_LEVEL = (os.getenv("LOG_LEVEL", "INFO") or "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("lexacae-backend")
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ============================================================
 # FASTAPI
@@ -62,7 +65,7 @@ logger = logging.getLogger("lexacae-backend")
 app = FastAPI(
     title="LexaCAE Backend",
     version="1.0.0",
-    description="Validación CAE (WSCDC) + Emisión WSFEv1 + PDF + Email",
+    description="Validación CAE (WSCDC) + Emisión WSFEv1 + PDF + Email + Perfil",
 )
 
 
@@ -109,29 +112,16 @@ def check_bearer(authorization: str):
         raise HTTPException(status_code=401, detail="Token inválido")
 
 
-@app.get("/health")
-def health():
-    try:
-        _sqlite_init()
-        return {"ok": True, "env": (os.getenv("AFIP_ENV", "prod") or "prod")}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@app.post("/auth/login")
-def login(payload: LoginRequest, x_api_key: str = Header(default="")):
-    check_api_key(x_api_key)
-    if payload.cuit != MAXI_CUIT or payload.password != MAXI_PASSWORD:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    return {"access_token": DEMO_ACCESS_TOKEN}
-
-
 # ============================================================
 # HELPERS
 # ============================================================
 def _norm_cuit(x: str) -> str:
     """Devuelve solo dígitos."""
     return re.sub(r"\D+", "", str(x or "")).strip()
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ============================================================
@@ -201,6 +191,22 @@ def _sqlite_init():
                 cert_b64 TEXT NOT NULL,
                 key_b64  TEXT NOT NULL,
                 enabled  INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+        # ✅ NUEVO: users (perfil + password hash opcional)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                cuit TEXT PRIMARY KEY,
+                password_hash TEXT,
+                full_name TEXT DEFAULT '',
+                email TEXT DEFAULT '',
+                phone TEXT DEFAULT '',
+                company TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
             """
@@ -304,6 +310,237 @@ def usage_total_endpoint(x_api_key: str = Header(default=""), authorization: str
     check_api_key(x_api_key)
     check_bearer(authorization)
     return usage_total_current()
+
+
+# ============================================================
+# PERFIL (NUEVO - PRO)
+# - Persistencia en SQLite
+# - No rompe tu login: fallback env (MAXI_CUIT/PASS)
+# ============================================================
+def _user_get(cuit: str) -> Optional[Dict[str, Any]]:
+    _sqlite_init()
+    c = _norm_cuit(cuit)
+    with sqlite3.connect(SQLITE_PATH) as con:
+        cur = con.execute(
+            "SELECT cuit, password_hash, full_name, email, phone, company, created_at, updated_at FROM users WHERE cuit = ?",
+            (c,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "cuit": row[0],
+        "password_hash": row[1],
+        "full_name": row[2] or "",
+        "email": row[3] or "",
+        "phone": row[4] or "",
+        "company": row[5] or "",
+        "created_at": row[6],
+        "updated_at": row[7],
+    }
+
+
+def _user_ensure_exists(cuit: str):
+    """
+    Crea usuario en DB si no existe.
+    Para no romper tu lógica: si el CUIT es MAXI_CUIT, lo dejamos disponible.
+    """
+    _sqlite_init()
+    c = _norm_cuit(cuit)
+    now = _now_iso_utc()
+    with sqlite3.connect(SQLITE_PATH) as con:
+        con.execute(
+            """
+            INSERT INTO users (cuit, password_hash, full_name, email, phone, company, created_at, updated_at)
+            VALUES (?, NULL, '', '', '', '', ?, ?)
+            ON CONFLICT(cuit) DO NOTHING;
+            """,
+            (c, now, now),
+        )
+        con.commit()
+
+
+def _user_update(cuit: str, full_name: str, email: str, phone: str, company: str) -> Dict[str, Any]:
+    _sqlite_init()
+    c = _norm_cuit(cuit)
+    now = _now_iso_utc()
+    with sqlite3.connect(SQLITE_PATH) as con:
+        con.execute(
+            """
+            UPDATE users
+               SET full_name=?,
+                   email=?,
+                   phone=?,
+                   company=?,
+                   updated_at=?
+             WHERE cuit=?;
+            """,
+            ((full_name or "").strip(), (email or "").strip(), (phone or "").strip(), (company or "").strip(), now, c),
+        )
+        con.commit()
+    u = _user_get(c)
+    return u or {"cuit": c, "full_name": "", "email": "", "phone": "", "company": "", "created_at": now, "updated_at": now}
+
+
+def _user_set_password_hash(cuit: str, password_hash: str):
+    _sqlite_init()
+    c = _norm_cuit(cuit)
+    now = _now_iso_utc()
+    with sqlite3.connect(SQLITE_PATH) as con:
+        con.execute(
+            """
+            UPDATE users
+               SET password_hash=?,
+                   updated_at=?
+             WHERE cuit=?;
+            """,
+            (password_hash, now, c),
+        )
+        con.commit()
+
+
+class MeUpdateRequest(BaseModel):
+    full_name: Optional[str] = ""
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+    company: Optional[str] = ""
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6)
+
+
+def _current_user_cuit_from_env() -> str:
+    """
+    Tu backend hoy es single-user (MAXI_CUIT + DEMO token),
+    así que el "usuario actual" lo tratamos como MAXI_CUIT.
+    """
+    c = _norm_cuit(MAXI_CUIT)
+    if not c:
+        # si no seteaste MAXI_CUIT, igual devolvemos un placeholder para no romper
+        return "00000000000"
+    return c
+
+
+@app.get("/me")
+def me_get_endpoint(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+
+    cuit = _current_user_cuit_from_env()
+    _user_ensure_exists(cuit)
+    u = _user_get(cuit)
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # no devolvemos password_hash
+    return {
+        "cuit": u["cuit"],
+        "full_name": u["full_name"],
+        "email": u["email"],
+        "phone": u["phone"],
+        "company": u["company"],
+        "created_at": u["created_at"],
+        "updated_at": u["updated_at"],
+        "role": "admin",  # tu sistema actual es single-user, lo marco admin
+    }
+
+
+@app.put("/me")
+def me_update_endpoint(
+    payload: MeUpdateRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+
+    cuit = _current_user_cuit_from_env()
+    _user_ensure_exists(cuit)
+    u = _user_update(cuit, payload.full_name or "", payload.email or "", payload.phone or "", payload.company or "")
+    return {
+        "cuit": u["cuit"],
+        "full_name": u["full_name"],
+        "email": u["email"],
+        "phone": u["phone"],
+        "company": u["company"],
+        "created_at": u["created_at"],
+        "updated_at": u["updated_at"],
+        "role": "admin",
+    }
+
+
+@app.post("/me/change-password")
+def me_change_password_endpoint(
+    payload: ChangePasswordRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    check_api_key(x_api_key)
+    check_bearer(authorization)
+
+    cuit = _current_user_cuit_from_env()
+    _user_ensure_exists(cuit)
+    u = _user_get(cuit)
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # 1) Si hay password_hash en DB, validamos con eso
+    # 2) Si no hay, validamos contra MAXI_PASSWORD (compatibilidad)
+    stored_hash = (u.get("password_hash") or "").strip()
+    if stored_hash:
+        ok = pwd_context.verify(payload.current_password, stored_hash)
+    else:
+        ok = (payload.current_password == (MAXI_PASSWORD or ""))
+
+    if not ok:
+        raise HTTPException(status_code=401, detail="Contraseña actual incorrecta")
+
+    new_hash = pwd_context.hash(payload.new_password)
+    _user_set_password_hash(cuit, new_hash)
+    return {"ok": True}
+
+
+# ============================================================
+# HEALTH + LOGIN (compatible)
+# ============================================================
+@app.get("/health")
+def health():
+    try:
+        _sqlite_init()
+        return {"ok": True, "env": (os.getenv("AFIP_ENV", "prod") or "prod")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/auth/login")
+def login(payload: LoginRequest, x_api_key: str = Header(default="")):
+    """
+    ✅ Mantengo tu login:
+      - Si existe user.password_hash => valida con hash (nuevo)
+      - Si no => valida con MAXI_CUIT/MAXI_PASSWORD (viejo)
+    """
+    check_api_key(x_api_key)
+
+    cuit_in = _norm_cuit(payload.cuit)
+    if not cuit_in:
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+    # Si no coincide con MAXI_CUIT (single user), seguimos igual que vos:
+    if cuit_in != _norm_cuit(MAXI_CUIT):
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+    _user_ensure_exists(cuit_in)
+    u = _user_get(cuit_in)
+    if u and (u.get("password_hash") or "").strip():
+        if not pwd_context.verify(payload.password, u["password_hash"]):
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    else:
+        if payload.password != MAXI_PASSWORD:
+            raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+    return {"access_token": DEMO_ACCESS_TOKEN}
 
 
 # ============================================================
@@ -971,7 +1208,12 @@ def _wsaa_login_get_ta(service: str, env_cert_b64: str, env_key_b64: str, cache_
 
 
 def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
-    return _wsaa_login_get_ta(service=service, env_cert_b64=AFIP_CERT_B64, env_key_b64=AFIP_KEY_B64, cache_key=f"global:{AFIP_ENV}:{service}")
+    return _wsaa_login_get_ta(
+        service=service,
+        env_cert_b64=AFIP_CERT_B64,
+        env_key_b64=AFIP_KEY_B64,
+        cache_key=f"global:{AFIP_ENV}:{service}",
+    )
 
 
 def wsaa_login_get_ta_for(service: str, tenant_cuit: str, cert_b64: str, key_b64: str) -> Dict[str, str]:
@@ -1880,7 +2122,6 @@ def _send_email_with_pdf_resend(to_email: str, subject: str, text: str, html: st
         "subject": subject,
         "text": text,
         "html": html,
-        # Resend: attachments -> [{filename, content(base64)}]
         "attachments": [{"filename": filename, "content": att_b64}],
     }
     resp = resend.Emails.send(params)
@@ -1893,14 +2134,6 @@ def wsfe_email_endpoint(
     x_api_key: str = Header(default=""),
     authorization: str = Header(default=""),
 ):
-    """
-    Requerido por el FRONT:
-      POST /wsfe/email
-      { "to_email": "...", "pdf_payload": { ... } }
-
-    - Genera el PDF usando el mismo builder de /wsfe/pdf
-    - Envía mail con PDF adjunto (resend / brevo / brevo_smtp)
-    """
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -1908,7 +2141,6 @@ def wsfe_email_endpoint(
     if not to_email or "@" not in to_email:
         raise HTTPException(status_code=400, detail="to_email inválido.")
 
-    # Generar PDF (validando payload)
     try:
         pdf_req = WsfePdfRequest(**(payload.pdf_payload or {}))
         pdf_bytes = _build_simple_invoice_pdf(pdf_req)
@@ -1931,7 +2163,6 @@ def wsfe_email_endpoint(
 
     provider = (EMAIL_PROVIDER or "").strip().lower()
 
-    # contabilizar request (no toca PLAN_LIMIT de PDFs)
     try:
         usage_total_increment(files_delta=0, requests_delta=1)
         usage_increment(files_delta=0, requests_delta=1)

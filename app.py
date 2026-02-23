@@ -49,10 +49,8 @@ st.set_page_config(
     layout="wide",
 )
 
-# Header con logo + nombre
 col1, col2 = st.columns([1, 2])
 with col1:
-    # Si en mobile se rompe, igual lo dejamos porque vos lo querías grande.
     st.image("assets/favicon.png", width=600)
 with col2:
     st.markdown("## Validación en la nube.")
@@ -60,32 +58,23 @@ with col2:
     st.markdown("## Práctico. Seguro. Confiable.")
 
 st.divider()
-
-# ✅ activar bloqueo de Enter en password (una sola vez)
 block_enter_on_password_inputs()
 
 # ===================== CONFIG APP =====================
 st.title("Verificador de CAE")
 
-# ✅ Render ENV VARS (no st.secrets)
 BASE_URL = os.getenv("BASE_URL", "").strip()
 DEFAULT_BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "").strip()
 LOGIN_CUIT_DEFAULT = os.getenv("LOGIN_CUIT_DEFAULT", "").strip()
 
-# Límite opcional por seguridad (si está vacío o no existe => ilimitado)
 MAX_FILES_RAW = os.getenv("MAX_FILES", None)
 BATCH_SIZE_RAW = os.getenv("BATCH_SIZE", "50")
 
-# (Opcional) WhatsApp para renovación (si no lo seteás, usa el tuyo por defecto)
 RENEW_WHATSAPP = (os.getenv("RENEW_WHATSAPP", "5491131433906") or "").strip()
 RENEW_TEXT = (os.getenv("RENEW_TEXT", "Hola! Quiero renovar mi plan de LexaCAE. ¿Me ayudan?") or "").strip()
 
 # ===================== WHATSAPP FLOTANTE (GLOBAL) =====================
 def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: str = "Soporte técnico"):
-    """
-    Botón flotante WhatsApp (fijo abajo a la derecha) + mini tooltip.
-    Funciona en Streamlit porque inyecta HTML/CSS en el DOM del parent.
-    """
     import urllib.parse
 
     phone_digits = re.sub(r"\D+", "", phone or "")
@@ -166,7 +155,6 @@ def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: 
         unsafe_allow_html=True,
     )
 
-# ✅ WhatsApp soporte (configurable por ENV; por defecto usa el mismo que renovación)
 SUPPORT_WHATSAPP = (os.getenv("SUPPORT_WHATSAPP", RENEW_WHATSAPP) or "5491131433906").strip()
 SUPPORT_TEXT = (os.getenv(
     "SUPPORT_TEXT",
@@ -175,7 +163,6 @@ SUPPORT_TEXT = (os.getenv(
 SUPPORT_BUBBLE = (os.getenv("SUPPORT_BUBBLE", "Soporte técnico") or "Soporte técnico").strip()
 
 inject_whatsapp_floating_button(SUPPORT_WHATSAPP, SUPPORT_TEXT, SUPPORT_BUBBLE)
-
 
 def _parse_int_or_none(x):
     try:
@@ -187,7 +174,6 @@ def _parse_int_or_none(x):
     except Exception:
         return None
 
-
 MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
 
 try:
@@ -198,9 +184,7 @@ except Exception:
 if BATCH_SIZE <= 0:
     BATCH_SIZE = 50
 
-# Normalizar BASE_URL sin trailing slash
 BASE_URL = BASE_URL.rstrip("/")
-
 if not BASE_URL:
     st.error("Falta BASE_URL en Render (Environment Variables). Ej: https://tu-backend.onrender.com")
     st.stop()
@@ -224,7 +208,6 @@ VTO_PATTERNS = [
     ),
 ]
 
-
 def find_first(patterns, text: str):
     for pat in patterns:
         m = pat.search(text)
@@ -238,7 +221,6 @@ def find_first(patterns, text: str):
             return m2.group(1)
     return None
 
-
 def parse_date(date_str: str):
     if not date_str:
         return None
@@ -250,20 +232,15 @@ def parse_date(date_str: str):
             pass
     return None
 
-
 def basic_format_ok(cae: str) -> bool:
     return bool(cae and re.fullmatch(r"\d{14}", cae))
 
-
-@st.cache_data(show_spinner=False)
-def extract_text_pdf_cached(file_bytes: bytes, max_pages: int = 5) -> str:
-    # Cachea la extracción para no recalcular en cada rerun
+def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         texts = []
         for page in pdf.pages[:max_pages]:
             texts.append(page.extract_text() or "")
         return "\n".join(texts)
-
 
 # ===================== SESSION STATE =====================
 def ensure_auth_state():
@@ -274,7 +251,6 @@ def ensure_auth_state():
             "access_token": "",
             "cuit": "",
         }
-
 
 ensure_auth_state()
 
@@ -294,12 +270,32 @@ def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
         raise RuntimeError("Login OK pero el backend no devolvió access_token.")
     return token
 
+def _auth_headers(api_key: str, access_token: str) -> dict:
+    h = {"Authorization": f"Bearer {access_token}"}
+    if api_key:
+        h["X-API-Key"] = api_key
+    return h
+
+def backend_me_get(base_url: str, api_key: str, access_token: str) -> dict:
+    r = requests.get(f"{base_url}/me", headers=_auth_headers(api_key, access_token), timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Perfil falló ({r.status_code}): {r.text}")
+    return r.json()
+
+def backend_me_update(base_url: str, api_key: str, access_token: str, payload: dict) -> dict:
+    r = requests.put(f"{base_url}/me", headers=_auth_headers(api_key, access_token), json=payload, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Actualizar perfil falló ({r.status_code}): {r.text}")
+    return r.json()
+
+def backend_change_password(base_url: str, api_key: str, access_token: str, payload: dict) -> dict:
+    r = requests.post(f"{base_url}/me/change-password", headers=_auth_headers(api_key, access_token), json=payload, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Cambiar contraseña falló ({r.status_code}): {r.text}")
+    return r.json()
 
 def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: list, timeout_s: int = 180):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-
+    headers = _auth_headers(api_key, access_token)
     files = [("files", (it["name"], it["bytes"], "application/pdf")) for it in pdf_items]
 
     r = requests.post(
@@ -308,9 +304,7 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
         files=files,
         timeout=timeout_s,
     )
-
     if r.status_code != 200:
-        # Intentar parsear JSON para error semántico del backend (PLAN_LIMIT_REACHED u otros)
         try:
             j = r.json()
             detail = j.get("detail", j)
@@ -319,116 +313,67 @@ def backend_verify(base_url: str, api_key: str, access_token: str, pdf_items: li
                 limit = detail.get("limit")
                 msg = detail.get("message") or "Ha alcanzado el límite de su plan."
                 raise RuntimeError(f"{msg} (Usadas: {used} / Límite: {limit})")
-            # Si hay JSON pero no es ese code, lo devolvemos igual (mejor debug)
-            raise RuntimeError(f"Verify falló ({r.status_code}): {detail}")
-        except ValueError:
-            # No es JSON
-            raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
+        except Exception:
+            pass
+        raise RuntimeError(f"Verify falló ({r.status_code}): {r.text}")
 
     return r.json()
 
-
 def backend_usage_current(base_url: str, api_key: str, access_token: str):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-    r = requests.get(f"{base_url}/usage/current", headers=headers, timeout=30)
+    r = requests.get(f"{base_url}/usage/current", headers=_auth_headers(api_key, access_token), timeout=30)
     if r.status_code != 200:
         raise RuntimeError(f"Usage falló ({r.status_code}): {r.text}")
     return r.json()
 
-
 def backend_usage_total(base_url: str, api_key: str, access_token: str):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-    r = requests.get(f"{base_url}/usage/total", headers=headers, timeout=30)
+    r = requests.get(f"{base_url}/usage/total", headers=_auth_headers(api_key, access_token), timeout=30)
     if r.status_code != 200:
         raise RuntimeError(f"Usage total falló ({r.status_code}): {r.text}")
     return r.json()
 
-
 def backend_send_usage_email(base_url: str, api_key: str, access_token: str):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-    r = requests.post(f"{base_url}/usage/email", headers=headers, timeout=60)
+    r = requests.post(f"{base_url}/usage/email", headers=_auth_headers(api_key, access_token), timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"Enviar email falló ({r.status_code}): {r.text}")
     return r.json()
 
-
 # ===================== WSFEv1 (FRONT CALLS) =====================
-def backend_tenant_upsert(
-    base_url: str,
-    api_key: str,
-    access_token: str,
-    cuit: str,
-    cert_b64: str,
-    key_b64: str,
-    enabled: bool = True,
-):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-
+def backend_tenant_upsert(base_url: str, api_key: str, access_token: str, cuit: str, cert_b64: str, key_b64: str, enabled: bool = True):
     payload = {"cuit": cuit, "cert_b64": cert_b64, "key_b64": key_b64, "enabled": bool(enabled)}
-    r = requests.post(f"{base_url}/tenants/upsert", headers=headers, json=payload, timeout=60)
+    r = requests.post(f"{base_url}/tenants/upsert", headers=_auth_headers(api_key, access_token), json=payload, timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"Tenant upsert falló ({r.status_code}): {r.text}")
     return r.json()
 
-
 def backend_wsfe_last(base_url: str, api_key: str, access_token: str, cuit: str, pto_vta: int, cbte_tipo: int):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-
     payload = {"cuit": cuit, "pto_vta": int(pto_vta), "cbte_tipo": int(cbte_tipo)}
-    r = requests.post(f"{base_url}/wsfe/last", headers=headers, json=payload, timeout=60)
+    r = requests.post(f"{base_url}/wsfe/last", headers=_auth_headers(api_key, access_token), json=payload, timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"WSFE last falló ({r.status_code}): {r.text}")
     return r.json()
 
-
 def backend_wsfe_cae(base_url: str, api_key: str, access_token: str, payload: dict):
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-
-    r = requests.post(f"{base_url}/wsfe/cae", headers=headers, json=payload, timeout=90)
+    r = requests.post(f"{base_url}/wsfe/cae", headers=_auth_headers(api_key, access_token), json=payload, timeout=90)
     if r.status_code != 200:
         raise RuntimeError(f"WSFE CAE falló ({r.status_code}): {r.text}")
     return r.json()
 
-
 def backend_wsfe_pdf(base_url: str, api_key: str, access_token: str, payload: dict, timeout_s: int = 60) -> bytes:
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-
-    r = requests.post(f"{base_url}/wsfe/pdf", headers=headers, json=payload, timeout=timeout_s)
+    r = requests.post(f"{base_url}/wsfe/pdf", headers=_auth_headers(api_key, access_token), json=payload, timeout=timeout_s)
     if r.status_code != 200:
         raise RuntimeError(f"WSFE PDF falló ({r.status_code}): {r.text}")
     return r.content
 
-
 def backend_wsfe_send_email(base_url: str, api_key: str, access_token: str, payload: dict, timeout_s: int = 60) -> dict:
-    headers = {"Authorization": f"Bearer {access_token}"}
-    if api_key:
-        headers["X-API-Key"] = api_key
-
-    r = requests.post(f"{base_url}/wsfe/email", headers=headers, json=payload, timeout=timeout_s)
+    r = requests.post(f"{base_url}/wsfe/email", headers=_auth_headers(api_key, access_token), json=payload, timeout=timeout_s)
     if r.status_code != 200:
         raise RuntimeError(f"WSFE email falló ({r.status_code}): {r.text}")
     return r.json()
-
 
 def chunk_list(items, size: int):
     if size <= 0:
         return [items]
     return [items[i : i + size] for i in range(0, len(items), size)]
-
 
 def _wa_renew_url() -> str:
     import urllib.parse
@@ -438,11 +383,9 @@ def _wa_renew_url() -> str:
     txt = urllib.parse.quote(RENEW_TEXT or "")
     return f"https://wa.me/{phone}?text={txt}"
 
-
 # ===================== SIDEBAR: LOGIN + NAV =====================
 with st.sidebar:
     st.subheader("Acceso")
-
     api_key = st.session_state.auth["api_key"]
 
     cuit_login = st.text_input(
@@ -480,10 +423,9 @@ with st.sidebar:
     st.divider()
 
     if st.session_state.auth["logged"]:
-        page = st.radio("Secciones", ["Validación", "Facturación (WSFEv1)"], horizontal=False)
+        page = st.radio("Secciones", ["Validación", "Facturación (WSFEv1)", "Perfil"], horizontal=False)
     else:
         page = "Validación"
-
 
 # ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
@@ -504,6 +446,86 @@ if not st.session_state.auth["logged"]:
     st.caption("Consejo: si subís muchos archivos, la validación se procesa automáticamente en tandas para evitar demoras.")
     st.stop()
 
+# ===================== PERFIL (NUEVO) =====================
+def render_perfil():
+    st.subheader("Mi perfil")
+    st.caption("Acá podés ver y actualizar tus datos. Los cambios se guardan en el sistema.")
+
+    try:
+        me = backend_me_get(
+            base_url=BASE_URL,
+            api_key=st.session_state.auth["api_key"],
+            access_token=st.session_state.auth["access_token"],
+        )
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("CUIT", me.get("cuit", st.session_state.auth.get("cuit", "")))
+    with c2:
+        st.metric("Rol", me.get("role", "user"))
+    with c3:
+        st.metric("Creado", (me.get("created_at", "") or "")[:10] or "-")
+    with c4:
+        st.metric("Actualizado", (me.get("updated_at", "") or "")[:10] or "-")
+
+    st.divider()
+
+    st.markdown("### Datos de contacto")
+    with st.form("form_profile", clear_on_submit=False):
+        full_name = st.text_input("Nombre y apellido", value=me.get("full_name", "") or "", placeholder="Ej: Elías Derrico")
+        company = st.text_input("Empresa / Estudio", value=me.get("company", "") or "", placeholder="Ej: Estudio Contable X")
+        email = st.text_input("Email", value=me.get("email", "") or "", placeholder="Ej: contacto@dominio.com")
+        phone = st.text_input("Teléfono", value=me.get("phone", "") or "", placeholder="Ej: 11 1234 5678")
+
+        colx1, colx2 = st.columns([1, 2])
+        with colx1:
+            save = st.form_submit_button("Guardar cambios", use_container_width=True)
+        with colx2:
+            st.caption("Tip: si el email está vacío, no se pueden enviar reportes por correo (según tu backend).")
+
+        if save:
+            try:
+                updated = backend_me_update(
+                    base_url=BASE_URL,
+                    api_key=st.session_state.auth["api_key"],
+                    access_token=st.session_state.auth["access_token"],
+                    payload={
+                        "full_name": full_name,
+                        "company": company,
+                        "email": email,
+                        "phone": phone,
+                    },
+                )
+                st.success("Listo. Tus datos se actualizaron.")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    st.divider()
+
+    st.markdown("### Seguridad")
+    with st.form("form_pass", clear_on_submit=True):
+        current_password = st.text_input("Contraseña actual", type="password")
+        new_password = st.text_input("Nueva contraseña (mín. 6)", type="password")
+        new_password2 = st.text_input("Repetir nueva contraseña", type="password")
+
+        ch = st.form_submit_button("Cambiar contraseña", use_container_width=True)
+        if ch:
+            try:
+                if new_password != new_password2:
+                    raise RuntimeError("Las contraseñas nuevas no coinciden.")
+                backend_change_password(
+                    base_url=BASE_URL,
+                    api_key=st.session_state.auth["api_key"],
+                    access_token=st.session_state.auth["access_token"],
+                    payload={"current_password": current_password, "new_password": new_password},
+                )
+                st.success("Contraseña actualizada.")
+            except Exception as e:
+                st.error(str(e))
 
 # ===================== PÁGINA: VALIDACIÓN =====================
 def render_validacion():
@@ -535,7 +557,6 @@ def render_validacion():
         )
         total_files = int(usage_total.get("files_count", 0) or 0)
         total_requests = int(usage_total.get("requests_count", 0) or 0)
-
         total_updated_at_raw = usage_total.get("updated_at", "") or ""
         total_updated_at = _fmt_yyyy_mm_from_iso(total_updated_at_raw)
 
@@ -644,7 +665,7 @@ def render_validacion():
 
         for i, f in enumerate(pdf_files, start=1):
             try:
-                text = extract_text_pdf_cached(f["bytes"], max_pages=5)
+                text = extract_text_pdf(f["bytes"], max_pages=5)
                 cae = find_first(CAE_PATTERNS, text)
                 vto_raw = find_first(VTO_PATTERNS, text)
                 vto_date = parse_date(vto_raw)
@@ -735,7 +756,6 @@ def render_validacion():
     if not df.empty:
         if "CAE" in df.columns:
             df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
-
         if "Estado" in df.columns:
             df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
@@ -763,7 +783,6 @@ def render_validacion():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
-
 
 # ===================== PÁGINA: FACTURACIÓN WSFEv1 =====================
 def render_facturacion():
@@ -809,13 +828,7 @@ def render_facturacion():
     cuit_emit = st.text_input("CUIT emisor (tenant)", value=cuit_tenant or "", key="emit_cuit")
     pto_vta = st.number_input("Punto de venta", min_value=1, max_value=99999, value=1, step=1, key="emit_ptovta")
     cbte_tipo = st.number_input("Tipo comprobante (ej: 11=Factura C / 1=Factura A / 6=Factura B)", min_value=1, max_value=999, value=11, step=1, key="emit_tipo")
-    concepto = st.selectbox(
-        "Concepto",
-        options=[1, 2, 3],
-        index=0,
-        format_func=lambda x: {1: "1 - Productos", 2: "2 - Servicios", 3: "3 - Prod y Serv"}[x],
-        key="emit_conc",
-    )
+    concepto = st.selectbox("Concepto", options=[1, 2, 3], index=0, format_func=lambda x: {1: "1 - Productos", 2: "2 - Servicios", 3: "3 - Prod y Serv"}[x], key="emit_conc")
 
     colr1, colr2 = st.columns(2)
     with colr1:
@@ -1024,9 +1037,10 @@ def render_facturacion():
             except Exception as e:
                 st.error(str(e))
 
-
 # ===================== ROUTER =====================
-if page == "Facturación (WSFEv1)":
+if page == "Perfil":
+    render_perfil()
+elif page == "Facturación (WSFEv1)":
     render_facturacion()
 else:
     render_validacion()

@@ -12,3 +12,4 @@ pytesseract==0.3.13
 certifi==2024.7.4
 resend
 reportlab==4.2.2
+passlib[bcrypt]
