@@ -29,7 +29,7 @@ def inject_enterprise_theme_light():
     Tema claro enterprise (default white) combinando acentos tipo LexaCAE:
     - fondo blanco / gris muy claro
     - cards blancas con borde suave
-    - acentos azul/cian (podés ajustar si tu logo usa otros tonos)
+    - acentos azul/cian
     """
     st.markdown(
         """
@@ -41,13 +41,12 @@ def inject_enterprise_theme_light():
             --lx-border: rgba(15,23,42,.12);
             --lx-text: rgba(15,23,42,.92);
             --lx-muted: rgba(15,23,42,.62);
-            --lx-accent: #2563eb;      /* azul */
-            --lx-accent2: #06b6d4;     /* cian */
-            --lx-accent3: #4f46e5;     /* índigo */
+            --lx-accent: #2563eb;
+            --lx-accent2: #06b6d4;
+            --lx-accent3: #4f46e5;
             --lx-shadow: 0 18px 50px rgba(15,23,42,.10);
           }
 
-          /* ===== Base ===== */
           .stApp {
             background:
               radial-gradient(1200px 600px at 15% 0%, rgba(6,182,212,.16), transparent 60%),
@@ -66,7 +65,6 @@ def inject_enterprise_theme_light():
             color: var(--lx-text);
           }
 
-          /* ===== Cards ===== */
           .lex-card {
             background: var(--lx-surface);
             border: 1px solid var(--lx-border);
@@ -88,7 +86,6 @@ def inject_enterprise_theme_light():
             font-size: 12px; color: rgba(15,23,42,.80);
           }
 
-          /* ===== Inputs + Buttons ===== */
           div[data-baseweb="input"] input, div[data-baseweb="textarea"] textarea {
             background: var(--lx-surface2) !important;
             border: 1px solid rgba(15,23,42,.14) !important;
@@ -101,7 +98,6 @@ def inject_enterprise_theme_light():
             border-color: rgba(37,99,235,.45) !important;
           }
 
-          /* Botones */
           .stButton > button, .stDownloadButton > button {
             border-radius: 12px !important;
             border: 1px solid rgba(37,99,235,.20) !important;
@@ -116,7 +112,6 @@ def inject_enterprise_theme_light():
             filter: brightness(1.03);
           }
 
-          /* Link button (st.link_button es <a>) */
           .stLinkButton > a {
             border-radius: 12px !important;
             border: 1px solid rgba(37,99,235,.20) !important;
@@ -132,24 +127,16 @@ def inject_enterprise_theme_light():
             filter: brightness(1.03);
           }
 
-          /* ===== Dataframe ===== */
           .stDataFrame { border-radius: 14px; overflow: hidden; border: 1px solid rgba(15,23,42,.10); }
 
-          /* ===== Animaciones (fade-in) ===== */
           @keyframes fadeUp { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: translateY(0);} }
           .lex-anim { animation: fadeUp .28s ease both; }
 
-          /* Sidebar claro */
           section[data-testid="stSidebar"] {
             background: rgba(255,255,255,.82);
             border-right: 1px solid rgba(15,23,42,.10);
           }
-
-          /* Ajustes de textos en sidebar */
           section[data-testid="stSidebar"] * { color: rgba(15,23,42,.92); }
-
-          /* Opcional: ocultar menu/footer */
-          /* #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;} */
         </style>
         """,
         unsafe_allow_html=True,
@@ -229,7 +216,7 @@ st.set_page_config(
 
 inject_enterprise_theme_light()
 
-# ===================== HERO / HEADER (enterprise - claro) =====================
+# ===================== HERO / HEADER =====================
 col1, col2 = st.columns([1, 2], vertical_alignment="center")
 with col1:
     st.image("assets/favicon.png", width=260)
@@ -442,6 +429,15 @@ def ensure_auth_state():
 
 ensure_auth_state()
 
+# NUEVO: items para PDF (facturación)
+def ensure_wsfe_items_state():
+    if "wsfe_items_df" not in st.session_state:
+        st.session_state.wsfe_items_df = pd.DataFrame(
+            columns=["Descripción", "Cantidad", "Precio Unit.", "Subtotal"]
+        )
+
+ensure_wsfe_items_state()
+
 # ===================== BACKEND CALLS =====================
 def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
     r = requests.post(
@@ -646,7 +642,7 @@ if not st.session_state.auth["logged"]:
     lex_card_close()
     st.stop()
 
-# ===================== PERFIL (NUEVO) =====================
+# ===================== PERFIL =====================
 def render_perfil():
     st.subheader("Mi perfil")
     st.caption("Acá podés ver y actualizar tus datos. Los cambios se guardan en el sistema.")
@@ -914,7 +910,7 @@ def render_validacion():
     st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
     st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDF (ajustable).")
 
-    button_disabled = bool(plan_blocked)
+    button_disabled = False
 
     if st.button("Validar ahora", use_container_width=True, disabled=button_disabled, key="btn_validar"):
         if not pdf_files:
@@ -992,6 +988,60 @@ def render_validacion():
                 use_container_width=True,
             )
 
+# ===================== HELPERS ITEMS (PDF) =====================
+def _safe_float(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        if isinstance(x, str):
+            x = x.strip().replace(",", ".")
+            if x == "":
+                return default
+        return float(x)
+    except Exception:
+        return default
+
+def _items_df_normalize(df_items: pd.DataFrame) -> pd.DataFrame:
+    if df_items is None or df_items.empty:
+        return pd.DataFrame(columns=["Descripción", "Cantidad", "Precio Unit.", "Subtotal"])
+    df2 = df_items.copy()
+    for col in ["Descripción", "Cantidad", "Precio Unit.", "Subtotal"]:
+        if col not in df2.columns:
+            df2[col] = ""
+    df2["Descripción"] = df2["Descripción"].astype(str).fillna("").str.strip()
+    df2["Cantidad"] = df2["Cantidad"].apply(lambda v: _safe_float(v, 0.0))
+    df2["Precio Unit."] = df2["Precio Unit."].apply(lambda v: _safe_float(v, 0.0))
+    # subtotal recalculable
+    df2["Subtotal"] = df2.apply(lambda r: round(_safe_float(r.get("Cantidad"), 0.0) * _safe_float(r.get("Precio Unit."), 0.0), 2), axis=1)
+    # limpiar filas vacías
+    df2 = df2[(df2["Descripción"] != "") | (df2["Cantidad"] != 0) | (df2["Precio Unit."] != 0)]
+    df2 = df2.reset_index(drop=True)
+    return df2
+
+def _items_to_payload(df_items: pd.DataFrame) -> list:
+    df2 = _items_df_normalize(df_items)
+    items = []
+    for _, r in df2.iterrows():
+        items.append({
+            "description": str(r.get("Descripción", "") or "").strip(),
+            "qty": float(r.get("Cantidad", 0.0) or 0.0),
+            "unit_price": float(r.get("Precio Unit.", 0.0) or 0.0),
+            "subtotal": float(r.get("Subtotal", 0.0) or 0.0),
+        })
+    return items
+
+def _items_sum(df_items: pd.DataFrame) -> float:
+    df2 = _items_df_normalize(df_items)
+    if df2.empty:
+        return 0.0
+    return float(df2["Subtotal"].sum())
+
+def _money_fmt(x: float) -> str:
+    try:
+        return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(x)
+
 # ===================== PÁGINA: FACTURACIÓN WSFEv1 =====================
 def render_facturacion():
     lex_card_open()
@@ -1029,12 +1079,18 @@ def render_facturacion():
     st.divider()
 
     st.subheader("2) Emitir comprobante (FECAESolicitar)")
-    st.caption("MVP: se envían importes + receptor. Para productos/ítems, los manejás internamente (WSFEv1 trabaja por totales).")
+    st.caption("WSFEv1 autoriza por totales. El detalle de ítems lo usamos para que el PDF quede profesional (no se envía a AFIP).")
 
     cuit_emit = st.text_input("CUIT emisor (tenant)", value=cuit_tenant or "", key="emit_cuit")
     pto_vta = st.number_input("Punto de venta", min_value=1, max_value=99999, value=1, step=1, key="emit_ptovta")
     cbte_tipo = st.number_input("Tipo comprobante (ej: 11=Factura C / 1=Factura A / 6=Factura B)", min_value=1, max_value=999, value=11, step=1, key="emit_tipo")
-    concepto = st.selectbox("Concepto", options=[1, 2, 3], index=0, format_func=lambda x: {1: "1 - Productos", 2: "2 - Servicios", 3: "3 - Prod y Serv"}[x], key="emit_conc")
+    concepto = st.selectbox(
+        "Concepto",
+        options=[1, 2, 3],
+        index=0,
+        format_func=lambda x: {1: "1 - Productos", 2: "2 - Servicios", 3: "3 - Prod y Serv"}[x],
+        key="emit_conc"
+    )
 
     colr1, colr2 = st.columns(2)
     with colr1:
@@ -1044,7 +1100,52 @@ def render_facturacion():
 
     cbte_fch = st.text_input("Fecha comprobante (YYYYMMDD)", value=datetime.now().strftime("%Y%m%d"), key="emit_fch")
 
-    st.markdown("**Importes**")
+    st.markdown("### Detalle (ítems) — para el PDF (opcional)")
+    st.caption("Esto NO impacta el CAE. Se incluye en el PDF para que la factura salga con detalle.")
+
+    # Editor de ítems (enterprise y simple)
+    st.session_state.wsfe_items_df = _items_df_normalize(st.session_state.wsfe_items_df)
+
+    colit1, colit2 = st.columns([3, 1])
+    with colit1:
+        edited_items = st.data_editor(
+            st.session_state.wsfe_items_df,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="wsfe_items_editor",
+            column_config={
+                "Descripción": st.column_config.TextColumn("Descripción", help="Detalle del producto/servicio", required=False),
+                "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, format="%.2f"),
+                "Precio Unit.": st.column_config.NumberColumn("Precio Unit.", min_value=0.0, step=1.0, format="%.2f"),
+                "Subtotal": st.column_config.NumberColumn("Subtotal", help="Se recalcula automáticamente", disabled=True, format="%.2f"),
+            },
+        )
+    with colit2:
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        if st.button("Recalcular", use_container_width=True, key="btn_items_recalc"):
+            st.session_state.wsfe_items_df = _items_df_normalize(edited_items)
+            toast_ok("Subtotales recalculados.")
+            st.rerun()
+        if st.button("Limpiar ítems", use_container_width=True, key="btn_items_clear"):
+            st.session_state.wsfe_items_df = pd.DataFrame(columns=["Descripción", "Cantidad", "Precio Unit.", "Subtotal"])
+            toast_warn("Ítems limpiados.")
+            st.rerun()
+
+    # Persistir cambios del editor (y recalcular subtotales siempre)
+    st.session_state.wsfe_items_df = _items_df_normalize(edited_items)
+    items_sum = _items_sum(st.session_state.wsfe_items_df)
+
+    colmA, colmB, colmC = st.columns(3)
+    with colmA:
+        st.metric("Subtotal ítems", _money_fmt(items_sum))
+    with colmB:
+        st.caption("Tip: si no cargás ítems, el PDF saldrá con un detalle genérico.")
+    with colmC:
+        auto_fill = st.checkbox("Autocompletar ImpNeto/ImpTotal desde ítems", value=False, key="items_auto_fill")
+
+    st.divider()
+
+    st.markdown("### Importes (totales para AFIP)")
     colm1, colm2, colm3 = st.columns(3)
     with colm1:
         imp_total = st.number_input("ImpTotal", min_value=0.0, value=0.0, step=1.0, key="emit_total")
@@ -1061,14 +1162,39 @@ def render_facturacion():
     with colm6:
         imp_tot_conc = st.number_input("ImpTotConc", min_value=0.0, value=0.0, step=1.0, key="emit_concimp")
 
-    st.markdown("**Moneda**")
+    # Autocompletar si el usuario lo pide
+    if auto_fill and items_sum > 0:
+        # Nota: si el usuario está emitiendo con IVA, puede que ImpTotal != items_sum.
+        # Para no invadir, completamos neto y total SOLO cuando están en 0.
+        if float(imp_neto) == 0.0:
+            st.session_state["emit_neto"] = float(items_sum)
+        if float(imp_total) == 0.0:
+            st.session_state["emit_total"] = float(items_sum)
+        # refrescar inputs
+        imp_neto = float(st.session_state.get("emit_neto", imp_neto))
+        imp_total = float(st.session_state.get("emit_total", imp_total))
+
+    # Validación de coherencia (solo para PDF/email)
+    # Regla práctica:
+    # - Si hay ítems: comparamos contra ImpNeto si > 0, sino contra ImpTotal.
+    compare_target = float(imp_neto) if float(imp_neto) > 0 else float(imp_total)
+    mismatch = False
+    if items_sum > 0 and compare_target > 0:
+        if abs(items_sum - compare_target) > 0.02:
+            mismatch = True
+            st.warning(
+                f"Los ítems suman **{_money_fmt(items_sum)}** pero tu total (referencia) es **{_money_fmt(compare_target)}**. "
+                "Podés emitir igual el CAE, pero para generar/enviar el PDF conviene que coincida."
+            )
+
+    st.markdown("### Moneda")
     colmo1, colmo2 = st.columns(2)
     with colmo1:
         mon_id = st.text_input("MonId", value="PES", key="emit_monid")
     with colmo2:
         mon_ctz = st.number_input("MonCotiz", min_value=0.000001, value=1.0, step=0.1, key="emit_monctz")
 
-    st.markdown("**IVA (opcional)**")
+    st.markdown("### IVA (opcional)")
     st.caption("Si usás Factura A/B normalmente cargás alícuotas. Si emitís C, suele ir 0.")
     use_iva = st.checkbox("Cargar alícuotas de IVA", value=False, key="emit_use_iva")
 
@@ -1174,17 +1300,26 @@ def render_facturacion():
                         f"{int(cbtenro) if cbtenro is not None else 'sinnro'}.pdf"
                     )
 
+                    # NUEVO: items se agregan SOLO para el PDF
+                    items_payload = _items_to_payload(st.session_state.wsfe_items_df)
+
                     pdf_payload = dict(payload)
                     pdf_payload.update({
                         "cbte_nro": cbtenro,
                         "cae": cae,
                         "cae_vto": cae_vto,
                         "resultado": resp.get("resultado"),
+                        "items": items_payload,  # <-- clave nueva para backend /wsfe/pdf
                     })
 
                     colpdf1, colpdf2 = st.columns(2)
                     with colpdf1:
                         if st.button("Generar PDF", use_container_width=True, key="btn_wsfe_gen_pdf"):
+                            # si hay mismatch fuerte, frenamos PDF para evitar que salga mal
+                            if mismatch:
+                                toast_err("Ajustá los totales o los ítems antes de generar el PDF (no coinciden).")
+                                st.stop()
+
                             with st.spinner("Generando PDF..."):
                                 pdf_bytes = safe_call(
                                     "No pudimos generar el PDF.",
@@ -1218,9 +1353,14 @@ def render_facturacion():
                     colmail1, colmail2 = st.columns(2)
                     with colmail1:
                         if st.button("Enviar PDF por email", use_container_width=True, key="btn_wsfe_send_email"):
+                            if mismatch:
+                                toast_err("Ajustá los totales o los ítems antes de enviar el PDF (no coinciden).")
+                                st.stop()
+
                             if not (to_email or "").strip():
                                 toast_err("Ingresá un email destinatario.")
                             else:
+                                # enviamos el pdf_payload (ya tiene items)
                                 mail_payload = {"to_email": to_email.strip(), "pdf_payload": pdf_payload}
                                 with st.spinner("Enviando email..."):
                                     resp_mail = safe_call(
@@ -1235,6 +1375,7 @@ def render_facturacion():
 
                     with colmail2:
                         st.caption("Requiere endpoint backend **POST /wsfe/email** + SMTP configurado en el backend.")
+                        st.caption("El detalle de ítems se envía dentro de `pdf_payload.items`.")
 
 # ===================== ROUTER =====================
 if page == "Perfil":
