@@ -24,16 +24,36 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # ===================== UI HELPERS (enterprise + errores prolijos) =====================
-def inject_enterprise_theme():
+def inject_enterprise_theme_light():
+    """
+    Tema claro enterprise (default white) combinando acentos tipo LexaCAE:
+    - fondo blanco / gris muy claro
+    - cards blancas con borde suave
+    - acentos azul/cian (podés ajustar si tu logo usa otros tonos)
+    """
     st.markdown(
         """
         <style>
+          :root{
+            --lx-bg: #f7f9fc;
+            --lx-surface: rgba(255,255,255,.92);
+            --lx-surface2: #ffffff;
+            --lx-border: rgba(15,23,42,.12);
+            --lx-text: rgba(15,23,42,.92);
+            --lx-muted: rgba(15,23,42,.62);
+            --lx-accent: #2563eb;      /* azul */
+            --lx-accent2: #06b6d4;     /* cian */
+            --lx-accent3: #4f46e5;     /* índigo */
+            --lx-shadow: 0 18px 50px rgba(15,23,42,.10);
+          }
+
           /* ===== Base ===== */
           .stApp {
-            background: radial-gradient(1200px 600px at 20% 0%, rgba(56,189,248,.16), transparent 60%),
-                        radial-gradient(1000px 600px at 90% 10%, rgba(99,102,241,.14), transparent 55%),
-                        linear-gradient(180deg, #0b1220 0%, #0b1220 100%);
-            color: rgba(255,255,255,.92);
+            background:
+              radial-gradient(1200px 600px at 15% 0%, rgba(6,182,212,.16), transparent 60%),
+              radial-gradient(1000px 600px at 95% 5%, rgba(37,99,235,.14), transparent 55%),
+              linear-gradient(180deg, var(--lx-bg) 0%, var(--lx-bg) 100%);
+            color: var(--lx-text);
           }
 
           section.main > div { padding-top: 1.15rem; }
@@ -43,68 +63,92 @@ def inject_enterprise_theme():
             font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
+            color: var(--lx-text);
           }
 
           /* ===== Cards ===== */
           .lex-card {
-            background: rgba(15, 23, 42, .82);
-            border: 1px solid rgba(255,255,255,.10);
+            background: var(--lx-surface);
+            border: 1px solid var(--lx-border);
             border-radius: 18px;
             padding: 16px 16px;
-            box-shadow: 0 18px 50px rgba(0,0,0,.35);
+            box-shadow: var(--lx-shadow);
             backdrop-filter: blur(8px);
           }
 
-          .lex-muted { color: rgba(255,255,255,.70); }
-          .lex-title { font-size: 1.7rem; font-weight: 750; letter-spacing: .2px; margin: 0; }
-          .lex-sub { font-size: .98rem; color: rgba(255,255,255,.75); margin-top: 6px; }
+          .lex-muted { color: var(--lx-muted); }
+          .lex-title { font-size: 1.7rem; font-weight: 780; letter-spacing: .2px; margin: 0; color: var(--lx-text); }
+          .lex-sub { font-size: .98rem; color: var(--lx-muted); margin-top: 6px; }
+
           .lex-badge {
             display:inline-flex; gap:8px; align-items:center;
             padding: 6px 10px; border-radius: 999px;
-            border: 1px solid rgba(255,255,255,.14);
-            background: rgba(2,6,23,.40);
-            font-size: 12px; color: rgba(255,255,255,.85);
+            border: 1px solid rgba(37,99,235,.18);
+            background: linear-gradient(180deg, rgba(37,99,235,.10), rgba(6,182,212,.08));
+            font-size: 12px; color: rgba(15,23,42,.80);
           }
 
           /* ===== Inputs + Buttons ===== */
           div[data-baseweb="input"] input, div[data-baseweb="textarea"] textarea {
-            background: rgba(2, 6, 23, .55) !important;
-            border: 1px solid rgba(255,255,255,.14) !important;
+            background: var(--lx-surface2) !important;
+            border: 1px solid rgba(15,23,42,.14) !important;
             border-radius: 12px !important;
-            color: rgba(255,255,255,.92) !important;
+            color: var(--lx-text) !important;
           }
           div[data-baseweb="input"] input:focus, div[data-baseweb="textarea"] textarea:focus {
             outline: none !important;
-            box-shadow: 0 0 0 3px rgba(56,189,248,.22) !important;
-            border-color: rgba(56,189,248,.45) !important;
+            box-shadow: 0 0 0 3px rgba(37,99,235,.18) !important;
+            border-color: rgba(37,99,235,.45) !important;
           }
 
-          .stButton > button, .stDownloadButton > button, .stLinkButton > a {
+          /* Botones */
+          .stButton > button, .stDownloadButton > button {
             border-radius: 12px !important;
-            border: 1px solid rgba(255,255,255,.14) !important;
-            background: linear-gradient(180deg, rgba(30,41,59,.85), rgba(15,23,42,.85)) !important;
-            color: rgba(255,255,255,.92) !important;
-            box-shadow: 0 14px 30px rgba(0,0,0,.28) !important;
+            border: 1px solid rgba(37,99,235,.20) !important;
+            background: linear-gradient(180deg, rgba(37,99,235,.10), rgba(6,182,212,.08)) !important;
+            color: rgba(15,23,42,.92) !important;
+            box-shadow: 0 12px 26px rgba(15,23,42,.10) !important;
+            transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+          }
+          .stButton > button:hover, .stDownloadButton > button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 16px 34px rgba(15,23,42,.14) !important;
+            filter: brightness(1.03);
+          }
+
+          /* Link button (st.link_button es <a>) */
+          .stLinkButton > a {
+            border-radius: 12px !important;
+            border: 1px solid rgba(37,99,235,.20) !important;
+            background: linear-gradient(180deg, rgba(37,99,235,.10), rgba(6,182,212,.08)) !important;
+            color: rgba(15,23,42,.92) !important;
+            box-shadow: 0 12px 26px rgba(15,23,42,.10) !important;
             transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
             text-decoration: none !important;
           }
-          .stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover {
+          .stLinkButton > a:hover {
             transform: translateY(-1px);
-            box-shadow: 0 18px 38px rgba(0,0,0,.36) !important;
-            filter: brightness(1.05);
+            box-shadow: 0 16px 34px rgba(15,23,42,.14) !important;
+            filter: brightness(1.03);
           }
 
-          .stDataFrame { border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.10); }
+          /* ===== Dataframe ===== */
+          .stDataFrame { border-radius: 14px; overflow: hidden; border: 1px solid rgba(15,23,42,.10); }
 
+          /* ===== Animaciones (fade-in) ===== */
           @keyframes fadeUp { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: translateY(0);} }
           .lex-anim { animation: fadeUp .28s ease both; }
 
+          /* Sidebar claro */
           section[data-testid="stSidebar"] {
-            background: rgba(2,6,23,.55);
-            border-right: 1px solid rgba(255,255,255,.10);
+            background: rgba(255,255,255,.82);
+            border-right: 1px solid rgba(15,23,42,.10);
           }
 
-          /* Opcional */
+          /* Ajustes de textos en sidebar */
+          section[data-testid="stSidebar"] * { color: rgba(15,23,42,.92); }
+
+          /* Opcional: ocultar menu/footer */
           /* #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;} */
         </style>
         """,
@@ -183,9 +227,9 @@ st.set_page_config(
     layout="wide",
 )
 
-inject_enterprise_theme()
+inject_enterprise_theme_light()
 
-# ===================== HERO / HEADER (enterprise) =====================
+# ===================== HERO / HEADER (enterprise - claro) =====================
 col1, col2 = st.columns([1, 2], vertical_alignment="center")
 with col1:
     st.image("assets/favicon.png", width=260)
@@ -251,7 +295,7 @@ def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: 
             border-radius: 999px;
             font-size: 13px;
             line-height: 1;
-            box-shadow: 0 12px 28px rgba(0,0,0,.25);
+            box-shadow: 0 12px 28px rgba(0,0,0,.18);
             border: 1px solid rgba(255,255,255,.12);
             white-space: nowrap;
           }}
@@ -265,13 +309,13 @@ def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: 
             justify-content: center;
             text-decoration: none !important;
             background: #25D366;
-            box-shadow: 0 14px 32px rgba(0,0,0,.25);
+            box-shadow: 0 14px 32px rgba(0,0,0,.18);
             border: 1px solid rgba(255,255,255,.25);
             transition: transform .15s ease, box-shadow .15s ease;
           }}
           .wa-btn:hover {{
             transform: translateY(-2px);
-            box-shadow: 0 18px 36px rgba(0,0,0,.32);
+            box-shadow: 0 18px 36px rgba(0,0,0,.22);
           }}
 
           .wa-icon {{
@@ -894,7 +938,6 @@ def render_validacion():
                         timeout_s=180,
                     )
                 except Exception as e:
-                    # UI prolija + botón renovar si aplica
                     msg = str(e) or "Falló la validación contra AFIP."
                     logger.error("verify error: %s\n%s", msg, traceback.format_exc())
                     status.update(label="Validación incompleta (hubo errores).", state="error")
@@ -914,7 +957,7 @@ def render_validacion():
                 df = pd.DataFrame(all_rows)
                 st.dataframe(df, use_container_width=True)
             else:
-                if status._state != "error":
+                if getattr(status, "_state", "") != "error":
                     status.update(label="Sin resultados para mostrar.", state="complete")
                 toast_warn("No hubo resultados para mostrar (probá de nuevo).")
 
