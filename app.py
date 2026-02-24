@@ -2,6 +2,8 @@ import os
 import io
 import zipfile
 import re
+import logging
+import traceback
 from datetime import datetime
 
 import pandas as pd
@@ -9,6 +11,138 @@ import streamlit as st
 import pdfplumber
 import requests
 from PIL import Image
+
+# ===================== STREAMLIT: NO MOSTRAR DETALLES DE ERRORES (UI) =====================
+try:
+    st.set_option("client.showErrorDetails", False)
+except Exception:
+    pass
+
+# ===================== LOGGING (solo servidor) =====================
+logger = logging.getLogger("lexacae_front")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# ===================== UI HELPERS (enterprise + errores prolijos) =====================
+def inject_enterprise_theme():
+    st.markdown(
+        """
+        <style>
+          /* ===== Base ===== */
+          .stApp {
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(56,189,248,.16), transparent 60%),
+                        radial-gradient(1000px 600px at 90% 10%, rgba(99,102,241,.14), transparent 55%),
+                        linear-gradient(180deg, #0b1220 0%, #0b1220 100%);
+            color: rgba(255,255,255,.92);
+          }
+
+          section.main > div { padding-top: 1.15rem; }
+          .block-container { max-width: 1200px; }
+
+          html, body, [class*="css"] {
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+          }
+
+          /* ===== Cards ===== */
+          .lex-card {
+            background: rgba(15, 23, 42, .82);
+            border: 1px solid rgba(255,255,255,.10);
+            border-radius: 18px;
+            padding: 16px 16px;
+            box-shadow: 0 18px 50px rgba(0,0,0,.35);
+            backdrop-filter: blur(8px);
+          }
+
+          .lex-muted { color: rgba(255,255,255,.70); }
+          .lex-title { font-size: 1.7rem; font-weight: 750; letter-spacing: .2px; margin: 0; }
+          .lex-sub { font-size: .98rem; color: rgba(255,255,255,.75); margin-top: 6px; }
+          .lex-badge {
+            display:inline-flex; gap:8px; align-items:center;
+            padding: 6px 10px; border-radius: 999px;
+            border: 1px solid rgba(255,255,255,.14);
+            background: rgba(2,6,23,.40);
+            font-size: 12px; color: rgba(255,255,255,.85);
+          }
+
+          /* ===== Inputs + Buttons ===== */
+          div[data-baseweb="input"] input, div[data-baseweb="textarea"] textarea {
+            background: rgba(2, 6, 23, .55) !important;
+            border: 1px solid rgba(255,255,255,.14) !important;
+            border-radius: 12px !important;
+            color: rgba(255,255,255,.92) !important;
+          }
+          div[data-baseweb="input"] input:focus, div[data-baseweb="textarea"] textarea:focus {
+            outline: none !important;
+            box-shadow: 0 0 0 3px rgba(56,189,248,.22) !important;
+            border-color: rgba(56,189,248,.45) !important;
+          }
+
+          .stButton > button, .stDownloadButton > button, .stLinkButton > a {
+            border-radius: 12px !important;
+            border: 1px solid rgba(255,255,255,.14) !important;
+            background: linear-gradient(180deg, rgba(30,41,59,.85), rgba(15,23,42,.85)) !important;
+            color: rgba(255,255,255,.92) !important;
+            box-shadow: 0 14px 30px rgba(0,0,0,.28) !important;
+            transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+            text-decoration: none !important;
+          }
+          .stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 18px 38px rgba(0,0,0,.36) !important;
+            filter: brightness(1.05);
+          }
+
+          .stDataFrame { border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.10); }
+
+          @keyframes fadeUp { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: translateY(0);} }
+          .lex-anim { animation: fadeUp .28s ease both; }
+
+          section[data-testid="stSidebar"] {
+            background: rgba(2,6,23,.55);
+            border-right: 1px solid rgba(255,255,255,.10);
+          }
+
+          /* Opcional */
+          /* #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;} */
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def lex_card_open(extra_class=""):
+    st.markdown(f'<div class="lex-card lex-anim {extra_class}">', unsafe_allow_html=True)
+
+def lex_card_close():
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def safe_call(user_msg: str, fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        logger.error("%s | %s\n%s", user_msg, str(e), traceback.format_exc())
+        st.error(user_msg)
+        st.caption(f"Detalle: {(str(e) or '')[:240]}")
+        return None
+
+def toast_ok(msg: str):
+    try:
+        st.toast(msg, icon="✅")
+    except Exception:
+        st.success(msg)
+
+def toast_warn(msg: str):
+    try:
+        st.toast(msg, icon="⚠️")
+    except Exception:
+        st.warning(msg)
+
+def toast_err(msg: str):
+    try:
+        st.toast(msg, icon="❌")
+    except Exception:
+        st.error(msg)
 
 # ===================== BLOQUEAR ENTER EN PASSWORD =====================
 def block_enter_on_password_inputs():
@@ -49,15 +183,25 @@ st.set_page_config(
     layout="wide",
 )
 
-col1, col2 = st.columns([1, 2])
-with col1:
-    st.image("assets/favicon.png", width=600)
-with col2:
-    st.markdown("## Validación en la nube.")
-    st.caption("## Verificación oficial de CAE contra AFIP.")
-    st.markdown("## Práctico. Seguro. Confiable.")
+inject_enterprise_theme()
 
-st.divider()
+# ===================== HERO / HEADER (enterprise) =====================
+col1, col2 = st.columns([1, 2], vertical_alignment="center")
+with col1:
+    st.image("assets/favicon.png", width=260)
+with col2:
+    lex_card_open()
+    st.markdown(
+        """
+        <div class="lex-badge">🛡️ Compliance • AFIP WSCDC • Auditoría</div>
+        <p class="lex-title" style="margin-top:10px;">LexaCAE — Verificador CAE</p>
+        <p class="lex-sub">Validación en la nube, con verificación oficial contra AFIP. Flujo simple, resultados exportables y control de plan.</p>
+        """,
+        unsafe_allow_html=True,
+    )
+    lex_card_close()
+
+st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 block_enter_on_password_inputs()
 
 # ===================== CONFIG APP =====================
@@ -397,18 +541,21 @@ with st.sidebar:
     colA, colB = st.columns(2)
     with colA:
         if st.button("Ingresar", use_container_width=True):
-            try:
-                token = backend_login(BASE_URL, api_key, cuit_login, password)
+            with st.spinner("Verificando credenciales..."):
+                token = safe_call(
+                    "No pudimos iniciar sesión. Revisá CUIT/contraseña e intentá de nuevo.",
+                    backend_login,
+                    BASE_URL, api_key, cuit_login, password
+                )
+            if token:
                 st.session_state.auth = {
                     "logged": True,
                     "api_key": api_key,
                     "access_token": token,
                     "cuit": cuit_login,
                 }
-                st.success("Sesión iniciada.")
+                toast_ok("Sesión iniciada.")
                 st.rerun()
-            except Exception as e:
-                st.error(str(e))
 
     with colB:
         if st.button("Salir", use_container_width=True):
@@ -418,6 +565,7 @@ with st.sidebar:
                 "access_token": "",
                 "cuit": "",
             }
+            toast_warn("Sesión cerrada.")
             st.rerun()
 
     st.divider()
@@ -427,10 +575,18 @@ with st.sidebar:
     else:
         page = "Validación"
 
+    st.divider()
+    compact = st.toggle("Modo compacto", value=True)
+    if compact:
+        st.markdown(
+            "<style>section.main .block-container{padding-top:.8rem;} .stDataFrame{font-size: 0.92rem;}</style>",
+            unsafe_allow_html=True
+        )
+
 # ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
+    lex_card_open()
     st.info("Iniciá sesión para comenzar.")
-
     st.subheader("Cómo funciona")
     st.write("Seguí estos pasos para validar tus facturas:")
     c1, c2, c3, c4 = st.columns(4)
@@ -442,8 +598,8 @@ if not st.session_state.auth["logged"]:
         st.markdown("**3) Vista previa**\n\nDetectamos CAE y vencimiento desde el PDF.")
     with c4:
         st.markdown("**4) Validación AFIP**\n\nConfirmamos contra AFIP vía WSCDC.")
-
     st.caption("Consejo: si subís muchos archivos, la validación se procesa automáticamente en tandas para evitar demoras.")
+    lex_card_close()
     st.stop()
 
 # ===================== PERFIL (NUEVO) =====================
@@ -451,15 +607,13 @@ def render_perfil():
     st.subheader("Mi perfil")
     st.caption("Acá podés ver y actualizar tus datos. Los cambios se guardan en el sistema.")
 
-    try:
-        me = backend_me_get(
-            base_url=BASE_URL,
-            api_key=st.session_state.auth["api_key"],
-            access_token=st.session_state.auth["access_token"],
-        )
-    except Exception as e:
-        st.error(str(e))
-        st.stop()
+    me = safe_call(
+        "No pudimos cargar tu perfil ahora mismo. Probá de nuevo en unos segundos.",
+        backend_me_get,
+        BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"]
+    )
+    if not me:
+        return
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -487,22 +641,21 @@ def render_perfil():
             st.caption("Tip: si el email está vacío, no se pueden enviar reportes por correo (según tu backend).")
 
         if save:
-            try:
-                updated = backend_me_update(
-                    base_url=BASE_URL,
-                    api_key=st.session_state.auth["api_key"],
-                    access_token=st.session_state.auth["access_token"],
-                    payload={
+            with st.spinner("Guardando cambios..."):
+                updated = safe_call(
+                    "No pudimos actualizar tu perfil. Probá nuevamente.",
+                    backend_me_update,
+                    BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
+                    {
                         "full_name": full_name,
                         "company": company,
                         "email": email,
                         "phone": phone,
                     },
                 )
-                st.success("Listo. Tus datos se actualizaron.")
+            if updated:
+                toast_ok("Listo. Datos actualizados.")
                 st.rerun()
-            except Exception as e:
-                st.error(str(e))
 
     st.divider()
 
@@ -517,22 +670,27 @@ def render_perfil():
             try:
                 if new_password != new_password2:
                     raise RuntimeError("Las contraseñas nuevas no coinciden.")
-                backend_change_password(
-                    base_url=BASE_URL,
-                    api_key=st.session_state.auth["api_key"],
-                    access_token=st.session_state.auth["access_token"],
-                    payload={"current_password": current_password, "new_password": new_password},
-                )
-                st.success("Contraseña actualizada.")
+                with st.spinner("Actualizando contraseña..."):
+                    ok = safe_call(
+                        "No pudimos cambiar la contraseña. Revisá los datos e intentá de nuevo.",
+                        backend_change_password,
+                        BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
+                        {"current_password": current_password, "new_password": new_password},
+                    )
+                if ok is not None:
+                    toast_ok("Contraseña actualizada.")
             except Exception as e:
-                st.error(str(e))
+                toast_err("No pudimos cambiar la contraseña.")
+                st.caption(f"Detalle: {(str(e) or '')[:240]}")
 
 # ===================== PÁGINA: VALIDACIÓN =====================
 def render_validacion():
+    lex_card_open()
     st.info(
         "En una primera instancia detectamos el CAE y su vencimiento directamente desde el PDF cargado. "
         "Luego, validamos la información contra AFIP utilizando el servicio oficial WSCDC (ComprobanteConstatar)."
     )
+    lex_card_close()
 
     st.subheader("Uso del plan")
 
@@ -549,12 +707,13 @@ def render_validacion():
             return s[:7]
         return s
 
-    try:
-        usage_total = backend_usage_total(
-            base_url=BASE_URL,
-            api_key=st.session_state.auth["api_key"],
-            access_token=st.session_state.auth["access_token"],
-        )
+    usage_total = safe_call(
+        "No pudimos obtener el uso TOTAL en este momento. Probá nuevamente en unos segundos.",
+        backend_usage_total,
+        BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"]
+    )
+
+    if usage_total:
         total_files = int(usage_total.get("files_count", 0) or 0)
         total_requests = int(usage_total.get("requests_count", 0) or 0)
         total_updated_at_raw = usage_total.get("updated_at", "") or ""
@@ -581,17 +740,15 @@ def render_validacion():
                 st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
                 st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
 
-    except Exception:
-        st.warning("No pudimos obtener el uso TOTAL en este momento. Probá nuevamente en unos segundos.")
-
     st.subheader("Resumen de uso del mes")
 
-    try:
-        usage = backend_usage_current(
-            base_url=BASE_URL,
-            api_key=st.session_state.auth["api_key"],
-            access_token=st.session_state.auth["access_token"],
-        )
+    usage = safe_call(
+        "No pudimos obtener el resumen mensual en este momento. Probá nuevamente en unos segundos.",
+        backend_usage_current,
+        BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"]
+    )
+
+    if usage:
         ym = usage.get("year_month", "")
         files_count = int(usage.get("files_count", 0) or 0)
         requests_count = int(usage.get("requests_count", 0) or 0)
@@ -607,18 +764,14 @@ def render_validacion():
         cbtn1, _ = st.columns([1, 3])
         with cbtn1:
             if st.button("Enviar resumen por email", use_container_width=True):
-                try:
-                    backend_send_usage_email(
-                        base_url=BASE_URL,
-                        api_key=st.session_state.auth["api_key"],
-                        access_token=st.session_state.auth["access_token"],
+                with st.spinner("Enviando email..."):
+                    ok = safe_call(
+                        "No pudimos enviar el email de resumen. Verificá que tu perfil tenga email cargado.",
+                        backend_send_usage_email,
+                        BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"]
                     )
-                    st.success("Email enviado correctamente.")
-                except Exception as e:
-                    st.error(str(e))
-
-    except Exception:
-        st.warning("No pudimos obtener el resumen mensual en este momento. Probá nuevamente en unos segundos.")
+                if ok is not None:
+                    toast_ok("Email enviado correctamente.")
 
     st.divider()
 
@@ -638,7 +791,7 @@ def render_validacion():
         uploaded = st.file_uploader("Subí tus facturas en PDF", type=["pdf"], accept_multiple_files=True, key="uploader_pdf")
         if uploaded:
             if MAX_FILES is not None and len(uploaded) > MAX_FILES:
-                st.warning(f"Subiste {len(uploaded)} PDF. Por configuración se procesarán solo los primeros {MAX_FILES}.")
+                toast_warn(f"Subiste {len(uploaded)} PDF. Se procesarán solo los primeros {MAX_FILES}.")
                 uploaded = uploaded[:MAX_FILES]
             pdf_files = [{"name": f.name, "bytes": f.getvalue()} for f in uploaded]
     else:
@@ -648,15 +801,15 @@ def render_validacion():
                 with zipfile.ZipFile(io.BytesIO(zip_up.getvalue())) as z:
                     names = [n for n in z.namelist() if n.lower().endswith(".pdf") and not n.endswith("/")]
                     if not names:
-                        st.error("No encontramos PDF dentro del ZIP.")
+                        toast_err("No encontramos PDF dentro del ZIP.")
                     else:
                         if MAX_FILES is not None and len(names) > MAX_FILES:
-                            st.warning(f"El ZIP tiene {len(names)} PDF. Por configuración se procesarán solo {MAX_FILES}.")
+                            toast_warn(f"El ZIP tiene {len(names)} PDF. Se procesarán solo {MAX_FILES}.")
                             names = names[:MAX_FILES]
                         pdf_files = [{"name": n.split("/")[-1], "bytes": z.read(n)} for n in names]
-                        st.success(f"PDF detectados: {len(pdf_files)}")
+                        toast_ok(f"PDF detectados: {len(pdf_files)}")
             except zipfile.BadZipFile:
-                st.error("ZIP inválido o dañado.")
+                toast_err("ZIP inválido o dañado.")
 
     rows = []
     if pdf_files:
@@ -721,16 +874,18 @@ def render_validacion():
 
     if st.button("Validar ahora", use_container_width=True, disabled=button_disabled, key="btn_validar"):
         if not pdf_files:
-            st.error("Primero cargá PDF o un ZIP")
+            toast_err("Primero cargá PDF o un ZIP.")
             st.stop()
 
-        try:
+        with st.status("Consultando AFIP (WSCDC)...", expanded=True) as status:
             all_rows = []
             batches = chunk_list(pdf_files, BATCH_SIZE)
-
             batch_progress = st.progress(0)
-            with st.spinner("Consultando AFIP..."):
-                for idx, batch in enumerate(batches, start=1):
+
+            for idx, batch in enumerate(batches, start=1):
+                st.write(f"• Lote {idx}/{len(batches)} — {len(batch)} PDFs")
+
+                try:
                     result = backend_verify(
                         base_url=BASE_URL,
                         api_key=st.session_state.auth["api_key"],
@@ -738,20 +893,30 @@ def render_validacion():
                         pdf_items=batch,
                         timeout_s=180,
                     )
-                    backend_rows = result.get("rows", [])
-                    all_rows.extend(backend_rows)
-                    batch_progress.progress(idx / len(batches))
+                except Exception as e:
+                    # UI prolija + botón renovar si aplica
+                    msg = str(e) or "Falló la validación contra AFIP."
+                    logger.error("verify error: %s\n%s", msg, traceback.format_exc())
+                    status.update(label="Validación incompleta (hubo errores).", state="error")
+                    st.error("Falló la validación con AFIP para uno de los lotes.")
+                    st.caption(f"Detalle: {msg[:240]}")
+                    if "límite de su plan" in msg.lower() or "plan_limit_reached" in msg.lower():
+                        st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
+                    break
+
+                backend_rows = (result or {}).get("rows", []) if isinstance(result, dict) else []
+                all_rows.extend(backend_rows)
+                batch_progress.progress(idx / len(batches))
 
             if all_rows:
+                status.update(label="Validación completada.", state="complete")
+                toast_ok("AFIP OK — resultados listos.")
                 df = pd.DataFrame(all_rows)
-                st.success("Validación completada.")
                 st.dataframe(df, use_container_width=True)
             else:
-                st.warning("No pudimos obtener resultados del servidor. Probá de nuevo en unos segundos.")
-        except Exception as e:
-            st.error(str(e))
-            if "límite de su plan" in str(e).lower() or "plan_limit_reached" in str(e).lower():
-                st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
+                if status._state != "error":
+                    status.update(label="Sin resultados para mostrar.", state="complete")
+                toast_warn("No hubo resultados para mostrar (probá de nuevo).")
 
     if not df.empty:
         if "CAE" in df.columns:
@@ -786,10 +951,12 @@ def render_validacion():
 
 # ===================== PÁGINA: FACTURACIÓN WSFEv1 =====================
 def render_facturacion():
+    lex_card_open()
     st.info(
         "Facturación (WSFEv1): emisión de comprobantes con CAE. "
         "Cada cliente emite con su CUIT y certificado. (El PDF lo generás vos; WSFE autoriza y devuelve CAE)."
     )
+    lex_card_close()
 
     st.subheader("1) Configurar emisor (CUIT + Certificado)")
     st.caption("Esto guarda/actualiza credenciales del cliente en el backend (tenant). Recomendado: que lo haga un admin/soporte.")
@@ -802,20 +969,16 @@ def render_facturacion():
     colx1, colx2 = st.columns(2)
     with colx1:
         if st.button("Guardar emisor", use_container_width=True, key="btn_tenant_save"):
-            try:
-                resp = backend_tenant_upsert(
-                    base_url=BASE_URL,
-                    api_key=st.session_state.auth["api_key"],
-                    access_token=st.session_state.auth["access_token"],
-                    cuit=cuit_tenant,
-                    cert_b64=cert_b64,
-                    key_b64=key_b64,
-                    enabled=enabled,
+            with st.spinner("Guardando emisor..."):
+                resp = safe_call(
+                    "No pudimos guardar el emisor (tenant). Verificá los datos e intentá de nuevo.",
+                    backend_tenant_upsert,
+                    BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
+                    cuit_tenant, cert_b64, key_b64, enabled
                 )
-                st.success("Emisor guardado correctamente.")
+            if resp:
+                toast_ok("Emisor guardado correctamente.")
                 st.json(resp)
-            except Exception as e:
-                st.error(str(e))
 
     with colx2:
         st.caption("Tip: podés pegar el base64 entero. Si viene con saltos de línea, no pasa nada.")
@@ -895,50 +1058,48 @@ def render_facturacion():
     colb1, colb2 = st.columns(2)
     with colb1:
         if st.button("Consultar último autorizado", use_container_width=True, key="btn_last"):
-            try:
-                resp = backend_wsfe_last(
-                    base_url=BASE_URL,
-                    api_key=st.session_state.auth["api_key"],
-                    access_token=st.session_state.auth["access_token"],
-                    cuit=cuit_emit,
-                    pto_vta=int(pto_vta),
-                    cbte_tipo=int(cbte_tipo),
+            with st.spinner("Consultando..."):
+                resp = safe_call(
+                    "No pudimos consultar el último autorizado.",
+                    backend_wsfe_last,
+                    BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
+                    cuit_emit, int(pto_vta), int(cbte_tipo)
                 )
-                st.success("OK")
+            if resp:
+                toast_ok("OK")
                 st.json(resp)
-            except Exception as e:
-                st.error(str(e))
 
     with colb2:
         if st.button("Emitir (obtener CAE)", use_container_width=True, key="btn_emit"):
-            try:
-                payload = {
-                    "cuit": str(cuit_emit).strip(),
-                    "pto_vta": int(pto_vta),
-                    "cbte_tipo": int(cbte_tipo),
-                    "concepto": int(concepto),
-                    "doc_tipo": int(doc_tipo),
-                    "doc_nro": str(doc_nro).strip(),
-                    "cbte_fch": str(cbte_fch).strip(),
-                    "imp_total": float(imp_total),
-                    "imp_tot_conc": float(imp_tot_conc),
-                    "imp_neto": float(imp_neto),
-                    "imp_op_ex": float(imp_op_ex),
-                    "imp_trib": float(imp_trib),
-                    "imp_iva": float(imp_iva),
-                    "mon_id": str(mon_id).strip(),
-                    "mon_ctz": float(mon_ctz),
-                    "iva": iva_items or [],
-                }
+            payload = {
+                "cuit": str(cuit_emit).strip(),
+                "pto_vta": int(pto_vta),
+                "cbte_tipo": int(cbte_tipo),
+                "concepto": int(concepto),
+                "doc_tipo": int(doc_tipo),
+                "doc_nro": str(doc_nro).strip(),
+                "cbte_fch": str(cbte_fch).strip(),
+                "imp_total": float(imp_total),
+                "imp_tot_conc": float(imp_tot_conc),
+                "imp_neto": float(imp_neto),
+                "imp_op_ex": float(imp_op_ex),
+                "imp_trib": float(imp_trib),
+                "imp_iva": float(imp_iva),
+                "mon_id": str(mon_id).strip(),
+                "mon_ctz": float(mon_ctz),
+                "iva": iva_items or [],
+            }
 
-                resp = backend_wsfe_cae(
-                    base_url=BASE_URL,
-                    api_key=st.session_state.auth["api_key"],
-                    access_token=st.session_state.auth["access_token"],
-                    payload=payload,
+            with st.spinner("Solicitando CAE (WSFE)..."):
+                resp = safe_call(
+                    "No pudimos emitir el comprobante (WSFE). Revisá los datos e intentá de nuevo.",
+                    backend_wsfe_cae,
+                    BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
+                    payload
                 )
 
-                st.success("Respuesta WSFE recibida.")
+            if resp:
+                toast_ok("Respuesta WSFE recibida.")
                 st.json(resp)
 
                 cae = (resp.get("cae") or "").strip()
@@ -981,19 +1142,17 @@ def render_facturacion():
                     colpdf1, colpdf2 = st.columns(2)
                     with colpdf1:
                         if st.button("Generar PDF", use_container_width=True, key="btn_wsfe_gen_pdf"):
-                            try:
-                                pdf_bytes = backend_wsfe_pdf(
-                                    base_url=BASE_URL,
-                                    api_key=st.session_state.auth["api_key"],
-                                    access_token=st.session_state.auth["access_token"],
-                                    payload=pdf_payload,
-                                    timeout_s=60,
+                            with st.spinner("Generando PDF..."):
+                                pdf_bytes = safe_call(
+                                    "No pudimos generar el PDF.",
+                                    backend_wsfe_pdf,
+                                    BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
+                                    pdf_payload, 60
                                 )
+                            if pdf_bytes:
                                 st.session_state.wsfe_pdf_bytes = pdf_bytes
                                 st.session_state.wsfe_pdf_name = pdf_name
-                                st.success("PDF generado.")
-                            except Exception as e:
-                                st.error(str(e))
+                                toast_ok("PDF generado.")
 
                     with colpdf2:
                         pdf_bytes_ss = st.session_state.get("wsfe_pdf_bytes")
@@ -1016,26 +1175,23 @@ def render_facturacion():
                     colmail1, colmail2 = st.columns(2)
                     with colmail1:
                         if st.button("Enviar PDF por email", use_container_width=True, key="btn_wsfe_send_email"):
-                            try:
-                                if not (to_email or "").strip():
-                                    raise RuntimeError("Ingresá un email destinatario.")
+                            if not (to_email or "").strip():
+                                toast_err("Ingresá un email destinatario.")
+                            else:
                                 mail_payload = {"to_email": to_email.strip(), "pdf_payload": pdf_payload}
-                                resp_mail = backend_wsfe_send_email(
-                                    base_url=BASE_URL,
-                                    api_key=st.session_state.auth["api_key"],
-                                    access_token=st.session_state.auth["access_token"],
-                                    payload=mail_payload,
-                                    timeout_s=60,
-                                )
-                                st.success("Email enviado (backend).")
-                                st.json(resp_mail)
-                            except Exception as e:
-                                st.error(str(e))
+                                with st.spinner("Enviando email..."):
+                                    resp_mail = safe_call(
+                                        "No pudimos enviar el email (backend).",
+                                        backend_wsfe_send_email,
+                                        BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
+                                        mail_payload, 60
+                                    )
+                                if resp_mail:
+                                    toast_ok("Email enviado (backend).")
+                                    st.json(resp_mail)
+
                     with colmail2:
                         st.caption("Requiere endpoint backend **POST /wsfe/email** + SMTP configurado en el backend.")
-
-            except Exception as e:
-                st.error(str(e))
 
 # ===================== ROUTER =====================
 if page == "Perfil":
