@@ -1,3 +1,24 @@
+# main.py — LexaCAE Backend (alineado con tu FRONT + PDF “real” con ítems)
+#
+# ✅ Compatible con tu front actual:
+#   - /auth/login
+#   - /me, /me/change-password
+#   - /usage/current, /usage/total, /usage/email
+#   - /verify
+#   - /tenants/upsert
+#   - /wsfe/last, /wsfe/cae
+#   - /wsfe/pdf  (AHORA con items + totales validados + layout tipo factura)
+#   - /wsfe/email (adjunta el mismo PDF real)
+#
+# ✅ PLAN_LIMIT:
+#   - Se controla en /verify por cantidad de PDFs subidos (bolsa total)
+#   - /wsfe/* NO consume “files”, solo suma requests (como lo tenías)
+#
+# ⚠️ Nota:
+#   - AFIP WSFEv1 trabaja por totales; los ítems son para TU PDF “real” (y para tu sistema).
+#   - Si el front todavía no manda items, el PDF sale igual (solo totales).
+#   - Si manda items, se renderiza tabla y se valida que sumen con imp_total.
+
 import os
 import io
 import re
@@ -8,6 +29,7 @@ import threading
 import sqlite3
 import logging
 import uuid
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -47,11 +69,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 
-# ✅ Password hashing (para perfil + cambio contraseña sin tocar envs)
+# ✅ Password hashing (para perfil + cambio contraseña)
 from passlib.context import CryptContext
 
 # ============================================================
-# LOGGING (pro - sin tocar lógica)
+# LOGGING
 # ============================================================
 LOG_LEVEL = (os.getenv("LOG_LEVEL", "INFO") or "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
@@ -65,7 +87,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 app = FastAPI(
     title="LexaCAE Backend",
     version="1.0.0",
-    description="Validación CAE (WSCDC) + Emisión WSFEv1 + PDF + Email + Perfil",
+    description="Validación CAE (WSCDC) + Emisión WSFEv1 + PDF real + Email + Perfil",
 )
 
 
@@ -80,7 +102,6 @@ async def add_request_id(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    # Mantengo simple: log + 500 genérico (no cambia lógica funcional, solo evita "traceback crudo")
     logger.exception("unhandled")
     return JSONResponse(status_code=500, content={"detail": "Error interno"})
 
@@ -116,7 +137,6 @@ def check_bearer(authorization: str):
 # HELPERS
 # ============================================================
 def _norm_cuit(x: str) -> str:
-    """Devuelve solo dígitos."""
     return re.sub(r"\D+", "", str(x or "")).strip()
 
 
@@ -124,15 +144,63 @@ def _now_iso_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _money_ar(v: float) -> str:
+    # 1234.5 -> 1.234,50
+    s = f"{float(v):,.2f}"
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _truncate(s: str, n: int = 70) -> str:
+    s = (s or "").strip()
+    if len(s) <= n:
+        return s
+    return s[: max(0, n - 1)].rstrip() + "…"
+
+
+def _wrap_text(c: canvas.Canvas, text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
+    """
+    Wrap simple basado en width de reportlab.
+    """
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    words = (text or "").split()
+    if not words:
+        return [""]
+
+    lines: List[str] = []
+    cur = ""
+    for w in words:
+        candidate = (cur + " " + w).strip()
+        if stringWidth(candidate, font_name, font_size) <= max_width:
+            cur = candidate
+        else:
+            if cur:
+                lines.append(cur)
+                cur = w
+            else:
+                # palabra muy larga -> cortar
+                lines.append(w)
+                cur = ""
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 # ============================================================
-# USAGE COUNTER (SQLite en disk de Render)
+# USAGE COUNTER (SQLite)
 # ============================================================
 SQLITE_PATH = (os.getenv("SQLITE_PATH", "") or "").strip()
 if not SQLITE_PATH:
-    if os.path.isdir("/var/data"):
-        SQLITE_PATH = "/var/data/usage.db"
-    else:
-        SQLITE_PATH = "/tmp/usage.db"
+    SQLITE_PATH = "/var/data/usage.db" if os.path.isdir("/var/data") else "/tmp/usage.db"
 
 _DB_LOCK = threading.Lock()
 
@@ -161,7 +229,6 @@ def _sqlite_init():
             );
             """
         )
-
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_total (
@@ -172,8 +239,7 @@ def _sqlite_init():
             );
             """
         )
-
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = _now_iso_utc()
         con.execute(
             """
             INSERT INTO usage_total (id, files_count, requests_count, updated_at)
@@ -183,7 +249,7 @@ def _sqlite_init():
             (now_iso,),
         )
 
-        # tenants WSFE (por cliente)
+        # tenants WSFE
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS tenants (
@@ -196,7 +262,7 @@ def _sqlite_init():
             """
         )
 
-        # ✅ NUEVO: users (perfil + password hash opcional)
+        # users (perfil + password)
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -217,7 +283,7 @@ def _sqlite_init():
 
 def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
     _ensure_sqlite_dir()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = _now_iso_utc()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -249,7 +315,7 @@ def _sqlite_get(year_month: str) -> Dict[str, Any]:
 def _sqlite_total_add(files_delta: int, requests_delta: int):
     _ensure_sqlite_dir()
     _sqlite_init()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = _now_iso_utc()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -313,9 +379,7 @@ def usage_total_endpoint(x_api_key: str = Header(default=""), authorization: str
 
 
 # ============================================================
-# PERFIL (NUEVO - PRO)
-# - Persistencia en SQLite
-# - No rompe tu login: fallback env (MAXI_CUIT/PASS)
+# PERFIL
 # ============================================================
 def _user_get(cuit: str) -> Optional[Dict[str, Any]]:
     _sqlite_init()
@@ -341,10 +405,6 @@ def _user_get(cuit: str) -> Optional[Dict[str, Any]]:
 
 
 def _user_ensure_exists(cuit: str):
-    """
-    Crea usuario en DB si no existe.
-    Para no romper tu lógica: si el CUIT es MAXI_CUIT, lo dejamos disponible.
-    """
     _sqlite_init()
     c = _norm_cuit(cuit)
     now = _now_iso_utc()
@@ -378,8 +438,15 @@ def _user_update(cuit: str, full_name: str, email: str, phone: str, company: str
             ((full_name or "").strip(), (email or "").strip(), (phone or "").strip(), (company or "").strip(), now, c),
         )
         con.commit()
-    u = _user_get(c)
-    return u or {"cuit": c, "full_name": "", "email": "", "phone": "", "company": "", "created_at": now, "updated_at": now}
+    return _user_get(c) or {
+        "cuit": c,
+        "full_name": "",
+        "email": "",
+        "phone": "",
+        "company": "",
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def _user_set_password_hash(cuit: str, password_hash: str):
@@ -412,15 +479,8 @@ class ChangePasswordRequest(BaseModel):
 
 
 def _current_user_cuit_from_env() -> str:
-    """
-    Tu backend hoy es single-user (MAXI_CUIT + DEMO token),
-    así que el "usuario actual" lo tratamos como MAXI_CUIT.
-    """
     c = _norm_cuit(MAXI_CUIT)
-    if not c:
-        # si no seteaste MAXI_CUIT, igual devolvemos un placeholder para no romper
-        return "00000000000"
-    return c
+    return c if c else "00000000000"
 
 
 @app.get("/me")
@@ -434,7 +494,6 @@ def me_get_endpoint(x_api_key: str = Header(default=""), authorization: str = He
     if not u:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # no devolvemos password_hash
     return {
         "cuit": u["cuit"],
         "full_name": u["full_name"],
@@ -443,16 +502,12 @@ def me_get_endpoint(x_api_key: str = Header(default=""), authorization: str = He
         "company": u["company"],
         "created_at": u["created_at"],
         "updated_at": u["updated_at"],
-        "role": "admin",  # tu sistema actual es single-user, lo marco admin
+        "role": "admin",
     }
 
 
 @app.put("/me")
-def me_update_endpoint(
-    payload: MeUpdateRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
+def me_update_endpoint(payload: MeUpdateRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -472,11 +527,7 @@ def me_update_endpoint(
 
 
 @app.post("/me/change-password")
-def me_change_password_endpoint(
-    payload: ChangePasswordRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
+def me_change_password_endpoint(payload: ChangePasswordRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -486,8 +537,6 @@ def me_change_password_endpoint(
     if not u:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # 1) Si hay password_hash en DB, validamos con eso
-    # 2) Si no hay, validamos contra MAXI_PASSWORD (compatibilidad)
     stored_hash = (u.get("password_hash") or "").strip()
     if stored_hash:
         ok = pwd_context.verify(payload.current_password, stored_hash)
@@ -503,7 +552,7 @@ def me_change_password_endpoint(
 
 
 # ============================================================
-# HEALTH + LOGIN (compatible)
+# HEALTH + LOGIN
 # ============================================================
 @app.get("/health")
 def health():
@@ -516,18 +565,12 @@ def health():
 
 @app.post("/auth/login")
 def login(payload: LoginRequest, x_api_key: str = Header(default="")):
-    """
-    ✅ Mantengo tu login:
-      - Si existe user.password_hash => valida con hash (nuevo)
-      - Si no => valida con MAXI_CUIT/MAXI_PASSWORD (viejo)
-    """
     check_api_key(x_api_key)
 
     cuit_in = _norm_cuit(payload.cuit)
     if not cuit_in:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    # Si no coincide con MAXI_CUIT (single user), seguimos igual que vos:
     if cuit_in != _norm_cuit(MAXI_CUIT):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
@@ -544,16 +587,17 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 
 
 # ============================================================
-# PLAN LIMIT
+# PLAN LIMIT (bolsa TOTAL de /verify)
 # ============================================================
-PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100"))
+PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100") or "100")
 
 
 def check_plan_limit_or_raise(files_to_add: int):
     usage = usage_total_current()
-    used = int(usage.get("files_count", 0))
+    used = int(usage.get("files_count", 0) or 0)
     limit = int(PLAN_LIMIT)
 
+    # ❗Bloquea si el total (used + nuevos) supera limit
     if used + int(files_to_add) > limit:
         raise HTTPException(
             status_code=403,
@@ -732,6 +776,7 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
                 raw = c.data.decode("utf-8", "ignore").strip()
                 if raw.startswith("http") and "p=" in raw:
                     from urllib.parse import urlparse, parse_qs
+                    import json
 
                     parsed = urlparse(raw)
                     qs = parse_qs(parsed.query)
@@ -742,8 +787,6 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
                     pad = "=" * (-len(p) % 4)
                     payload_b64 = p + pad
                     payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore")
-                    import json
-
                     data = json.loads(payload_json)
                     if isinstance(data, dict) and data:
                         return data
@@ -1005,11 +1048,7 @@ WSCDC_SOAP_ACTION = os.getenv(
     "WSCDC_SOAP_ACTION",
     "http://servicios1.afip.gob.ar/wscdc/ComprobanteConstatar",
 ).strip()
-WSCDC_NS = os.getenv(
-    "WSCDC_NS",
-    "http://servicios1.afip.gob.ar/wscdc/",
-).strip()
-
+WSCDC_NS = os.getenv("WSCDC_NS", "http://servicios1.afip.gob.ar/wscdc/").strip()
 
 # ============================================================
 # AFIP CONFIG (WSFEv1)
@@ -1208,12 +1247,7 @@ def _wsaa_login_get_ta(service: str, env_cert_b64: str, env_key_b64: str, cache_
 
 
 def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
-    return _wsaa_login_get_ta(
-        service=service,
-        env_cert_b64=AFIP_CERT_B64,
-        env_key_b64=AFIP_KEY_B64,
-        cache_key=f"global:{AFIP_ENV}:{service}",
-    )
+    return _wsaa_login_get_ta(service=service, env_cert_b64=AFIP_CERT_B64, env_key_b64=AFIP_KEY_B64, cache_key=f"global:{AFIP_ENV}:{service}")
 
 
 def wsaa_login_get_ta_for(service: str, tenant_cuit: str, cert_b64: str, key_b64: str) -> Dict[str, str]:
@@ -1287,7 +1321,7 @@ def wscdc_comprobante_constatar(
 
 
 # ============================================================
-# VERIFY ENDPOINT (PROD)
+# VERIFY ENDPOINT
 # ============================================================
 @app.post("/verify")
 async def verify(
@@ -1299,13 +1333,11 @@ async def verify(
     check_bearer(authorization)
     require_afip_env_wscdc()
 
+    # ✅ acá es donde funciona PLAN_LIMIT (bolsa total)
     check_plan_limit_or_raise(files_to_add=len(files))
 
     try:
         usage_total_increment(files_delta=len(files), requests_delta=1)
-    except Exception:
-        pass
-    try:
         usage_increment(files_delta=len(files), requests_delta=1)
     except Exception:
         pass
@@ -1622,18 +1654,12 @@ def tenant_get(cuit: str) -> Optional[Dict[str, Any]]:
         row = cur.fetchone()
     if not row:
         return None
-    return {
-        "cuit": row[0],
-        "cert_b64": row[1],
-        "key_b64": row[2],
-        "enabled": bool(int(row[3])),
-        "updated_at": row[4],
-    }
+    return {"cuit": row[0], "cert_b64": row[1], "key_b64": row[2], "enabled": bool(int(row[3])), "updated_at": row[4]}
 
 
 def tenant_upsert(cuit: str, cert_b64: str, key_b64: str, enabled: bool):
     _sqlite_init()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = _now_iso_utc()
     c = _norm_cuit(cuit)
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
@@ -1652,11 +1678,7 @@ def tenant_upsert(cuit: str, cert_b64: str, key_b64: str, enabled: bool):
 
 
 @app.post("/tenants/upsert")
-def tenants_upsert_endpoint(
-    payload: TenantUpsertRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
+def tenants_upsert_endpoint(payload: TenantUpsertRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -1905,11 +1927,7 @@ def wsfe_cae_solicitar(req: WsfeCaeRequest) -> Dict[str, Any]:
 
 
 @app.post("/wsfe/last")
-def wsfe_last_endpoint(
-    payload: WsfeLastRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
+def wsfe_last_endpoint(payload: WsfeLastRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
     if AFIP_ENV not in ("prod", "homo"):
@@ -1918,11 +1936,7 @@ def wsfe_last_endpoint(
 
 
 @app.post("/wsfe/cae")
-def wsfe_cae_endpoint(
-    payload: WsfeCaeRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
+def wsfe_cae_endpoint(payload: WsfeCaeRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
     if AFIP_ENV not in ("prod", "homo"):
@@ -1941,9 +1955,18 @@ def wsfe_cae_endpoint(
 
 
 # ============================================================
-# PDF SIMPLE para comprobante emitido (descarga)
+# PDF REAL (con ítems) — /wsfe/pdf
 # ============================================================
+class InvoiceItem(BaseModel):
+    descripcion: str = Field(..., min_length=1)
+    cantidad: float = Field(..., gt=0)
+    precio_unitario: float = Field(..., ge=0)
+    # si no lo mandan, lo calculamos
+    subtotal: Optional[float] = None
+
+
 class WsfePdfRequest(BaseModel):
+    # ✅ lo que tu FRONT ya manda
     cuit: str
     pto_vta: int
     cbte_tipo: int
@@ -1954,60 +1977,264 @@ class WsfePdfRequest(BaseModel):
     imp_total: float
     cae: str
     cae_vto: str
-    razon_social: str = "Cliente"
-    domicilio: str = "—"
+
+    # ✅ extras “real real” (opcionales)
+    resultado: Optional[str] = None
+    moneda: Optional[str] = "PES"
+
+    emisor_razon_social: Optional[str] = "—"
+    emisor_domicilio: Optional[str] = "—"
+    emisor_iibb: Optional[str] = "—"
+    emisor_inicio_act: Optional[str] = "—"
+
+    receptor_razon_social: Optional[str] = "Cliente"
+    receptor_domicilio: Optional[str] = "—"
+
+    # Totales desglosados (si los tenés)
+    imp_neto: Optional[float] = 0.0
+    imp_iva: Optional[float] = 0.0
+    imp_trib: Optional[float] = 0.0
+    imp_op_ex: Optional[float] = 0.0
+    imp_tot_conc: Optional[float] = 0.0
+
+    # Ítems
+    items: List[InvoiceItem] = Field(default_factory=list)
+
+    # Observaciones libres / condiciones
+    observaciones: Optional[str] = ""
 
 
-def _build_simple_invoice_pdf(data: WsfePdfRequest) -> bytes:
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    w, h = A4
+def _validate_items_vs_total(data: WsfePdfRequest):
+    if not data.items:
+        return
 
-    x = 18 * mm
-    y = h - 18 * mm
+    computed = 0.0
+    for it in data.items:
+        qty = _safe_float(it.cantidad, 0.0)
+        pu = _safe_float(it.precio_unitario, 0.0)
+        st = _safe_float(it.subtotal, qty * pu)
+        # normalizamos: si subtotal venía vacío, lo calculamos
+        it.subtotal = st
+        computed += st
 
+    # tolerancia por redondeo
+    if round(computed, 2) != round(float(data.imp_total), 2):
+        raise HTTPException(
+            status_code=400,
+            detail=f"La suma de ítems ({_money_ar(computed)}) no coincide con imp_total ({_money_ar(float(data.imp_total))}).",
+        )
+
+
+def _draw_header(c: canvas.Canvas, x: float, y: float, data: WsfePdfRequest) -> float:
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(x, y, "COMPROBANTE ELECTRÓNICO (MVP)")
-    c.setFont("Helvetica", 10)
+    c.drawString(x, y, "COMPROBANTE ELECTRÓNICO")
+    y -= 6 * mm
+    c.setFont("Helvetica", 9)
+    c.drawString(x, y, "Documento generado automáticamente por LexaCAE")
+    y -= 10 * mm
 
-    y -= 12 * mm
-    c.drawString(x, y, f"Emisor CUIT: {_norm_cuit(data.cuit)}")
-    y -= 6 * mm
-    c.drawString(x, y, f"PtoVta: {int(data.pto_vta)}   Tipo: {int(data.cbte_tipo)}   Nro: {int(data.cbte_nro)}")
-    y -= 6 * mm
-    c.drawString(x, y, f"Fecha: {str(data.cbte_fch).strip()}")
+    # Bloque emisor / comprobante
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x, y, "EMISOR")
+    c.setFont("Helvetica", 9)
+    y -= 5 * mm
+    c.drawString(x, y, f"CUIT: {_norm_cuit(data.cuit)}")
+    y -= 4 * mm
+    c.drawString(x, y, f"Razón Social: {str(data.emisor_razon_social or '—').strip()}")
+    y -= 4 * mm
+    c.drawString(x, y, f"Domicilio: {str(data.emisor_domicilio or '—').strip()}")
+    y -= 4 * mm
+    c.drawString(x, y, f"IIBB: {str(data.emisor_iibb or '—').strip()}   Inicio Act.: {str(data.emisor_inicio_act or '—').strip()}")
+
+    # Bloque comprobante (derecha)
+    right_x = 120 * mm
+    top_y = y + 13 * mm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(right_x, top_y, "COMPROBANTE")
+    c.setFont("Helvetica", 9)
+    c.drawString(right_x, top_y - 5 * mm, f"PtoVta: {int(data.pto_vta)}")
+    c.drawString(right_x, top_y - 9 * mm, f"Tipo: {int(data.cbte_tipo)}")
+    c.drawString(right_x, top_y - 13 * mm, f"Nro: {int(data.cbte_nro)}")
+    c.drawString(right_x, top_y - 17 * mm, f"Fecha: {str(data.cbte_fch).strip()}")
 
     y -= 10 * mm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(x, y, "Receptor")
-    c.setFont("Helvetica", 10)
-    y -= 6 * mm
+    c.line(x, y, 195 * mm, y)
+    y -= 8 * mm
+
+    # Receptor
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x, y, "RECEPTOR")
+    c.setFont("Helvetica", 9)
+    y -= 5 * mm
     c.drawString(x, y, f"DocTipo: {int(data.doc_tipo)}   DocNro: {_norm_cuit(data.doc_nro)}")
-    y -= 6 * mm
-    c.drawString(x, y, f"Razón Social: {str(data.razon_social).strip()}")
-    y -= 6 * mm
-    c.drawString(x, y, f"Domicilio: {str(data.domicilio).strip()}")
+    y -= 4 * mm
+    c.drawString(x, y, f"Razón Social: {str(data.receptor_razon_social or 'Cliente').strip()}")
+    y -= 4 * mm
+    c.drawString(x, y, f"Domicilio: {str(data.receptor_domicilio or '—').strip()}")
 
-    y -= 12 * mm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(x, y, "Importe")
-    c.setFont("Helvetica", 10)
-    y -= 6 * mm
-    total_str = f"{float(data.imp_total):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    c.drawString(x, y, f"TOTAL: $ {total_str}")
+    y -= 8 * mm
+    c.line(x, y, 195 * mm, y)
+    y -= 10 * mm
+    return y
 
-    y -= 12 * mm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(x, y, "Autorización AFIP")
-    c.setFont("Helvetica", 10)
+
+def _draw_items_table(c: canvas.Canvas, x: float, y: float, data: WsfePdfRequest) -> float:
+    if not data.items:
+        return y
+
+    # columnas
+    col_desc = x
+    col_qty = 132 * mm
+    col_pu = 155 * mm
+    col_sub = 178 * mm
+
+    # header tabla
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(col_desc, y, "Descripción")
+    c.drawString(col_qty, y, "Cant.")
+    c.drawString(col_pu, y, "P. Unit.")
+    c.drawString(col_sub, y, "Subtotal")
+    y -= 3 * mm
+    c.line(x, y, 195 * mm, y)
     y -= 6 * mm
+
+    c.setFont("Helvetica", 9)
+
+    # filas
+    max_desc_width = (col_qty - 4 * mm) - col_desc
+    for it in data.items:
+        if y < 35 * mm:
+            c.showPage()
+            y = A4[1] - 18 * mm
+            y = _draw_header(c, x, y, data)
+            # reimprimir header tabla
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(col_desc, y, "Descripción")
+            c.drawString(col_qty, y, "Cant.")
+            c.drawString(col_pu, y, "P. Unit.")
+            c.drawString(col_sub, y, "Subtotal")
+            y -= 3 * mm
+            c.line(x, y, 195 * mm, y)
+            y -= 6 * mm
+            c.setFont("Helvetica", 9)
+
+        desc = _truncate(it.descripcion, 220)
+        lines = _wrap_text(c, desc, max_desc_width, "Helvetica", 9)
+        qty = _safe_float(it.cantidad, 0.0)
+        pu = _safe_float(it.precio_unitario, 0.0)
+        st = _safe_float(it.subtotal, qty * pu)
+
+        # primera línea con números
+        c.drawString(col_desc, y, lines[0])
+        c.drawRightString(col_qty + 15 * mm, y, f"{qty:g}")
+        c.drawRightString(col_pu + 15 * mm, y, _money_ar(pu))
+        c.drawRightString(col_sub + 15 * mm, y, _money_ar(st))
+        y -= 5 * mm
+
+        # líneas extra (solo descripción)
+        for extra in lines[1:]:
+            if y < 35 * mm:
+                c.showPage()
+                y = A4[1] - 18 * mm
+                y = _draw_header(c, x, y, data)
+                c.setFont("Helvetica", 9)
+            c.drawString(col_desc, y, extra)
+            y -= 5 * mm
+
+        y -= 2 * mm
+
+    y -= 2 * mm
+    c.line(x, y, 195 * mm, y)
+    y -= 8 * mm
+    return y
+
+
+def _draw_totals_and_afip(c: canvas.Canvas, x: float, y: float, data: WsfePdfRequest) -> float:
+    right = 195 * mm
+
+    # Totales (derecha)
+    def row(label: str, value: str):
+        nonlocal y
+        c.setFont("Helvetica", 9)
+        c.drawRightString(right - 45 * mm, y, label)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawRightString(right, y, value)
+        y -= 5 * mm
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawRightString(right, y, "TOTALES")
+    y -= 7 * mm
+
+    # si vienen desglosados, los mostramos
+    imp_neto = _safe_float(data.imp_neto, 0.0)
+    imp_iva = _safe_float(data.imp_iva, 0.0)
+    imp_trib = _safe_float(data.imp_trib, 0.0)
+    imp_op_ex = _safe_float(data.imp_op_ex, 0.0)
+    imp_tot_conc = _safe_float(data.imp_tot_conc, 0.0)
+
+    any_breakdown = any(abs(v) > 0.0001 for v in [imp_neto, imp_iva, imp_trib, imp_op_ex, imp_tot_conc])
+    if any_breakdown:
+        if imp_neto:
+            row("Neto:", "$ " + _money_ar(imp_neto))
+        if imp_iva:
+            row("IVA:", "$ " + _money_ar(imp_iva))
+        if imp_trib:
+            row("Tributos:", "$ " + _money_ar(imp_trib))
+        if imp_op_ex:
+            row("Op. Exentas:", "$ " + _money_ar(imp_op_ex))
+        if imp_tot_conc:
+            row("No Gravado:", "$ " + _money_ar(imp_tot_conc))
+
+    row("TOTAL:", "$ " + _money_ar(float(data.imp_total)))
+
+    y -= 4 * mm
+    c.line(x, y, 195 * mm, y)
+    y -= 10 * mm
+
+    # AFIP
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x, y, "AUTORIZACIÓN AFIP")
+    y -= 6 * mm
+
+    c.setFont("Helvetica", 9)
     c.drawString(x, y, f"CAE: {str(data.cae).strip()}")
-    y -= 6 * mm
+    y -= 5 * mm
     c.drawString(x, y, f"Vto CAE: {str(data.cae_vto).strip()}")
+    y -= 5 * mm
 
-    y -= 12 * mm
-    c.setFont("Helvetica-Oblique", 8)
-    c.drawString(x, y, "Documento generado automáticamente por LexaCAE (MVP).")
+    if (data.resultado or "").strip():
+        c.drawString(x, y, f"Resultado: {str(data.resultado).strip()}")
+        y -= 5 * mm
+
+    if (data.observaciones or "").strip():
+        y -= 2 * mm
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(x, y, "Observaciones:")
+        y -= 5 * mm
+        c.setFont("Helvetica", 9)
+        lines = _wrap_text(c, str(data.observaciones), 175 * mm, "Helvetica", 9)
+        for ln in lines[:8]:
+            c.drawString(x, y, ln)
+            y -= 5 * mm
+
+    y -= 6 * mm
+    c.setFont("Helvetica-Oblique", 7)
+    c.drawString(x, y, "Este documento es una representación gráfica generada por LexaCAE (no sustituye la normativa AFIP).")
+
+    return y
+
+
+def _build_real_invoice_pdf(data: WsfePdfRequest) -> bytes:
+    _validate_items_vs_total(data)
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    x = 15 * mm
+    y = A4[1] - 18 * mm
+
+    y = _draw_header(c, x, y, data)
+    y = _draw_items_table(c, x, y, data)
+    _draw_totals_and_afip(c, x, y, data)
 
     c.showPage()
     c.save()
@@ -2015,17 +2242,19 @@ def _build_simple_invoice_pdf(data: WsfePdfRequest) -> bytes:
 
 
 @app.post("/wsfe/pdf")
-def wsfe_pdf_endpoint(
-    payload: WsfePdfRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
+def wsfe_pdf_endpoint(payload: WsfePdfRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
-    pdf_bytes = _build_simple_invoice_pdf(payload)
-    filename = f"factura_{_norm_cuit(payload.cuit)}_{payload.pto_vta}_{payload.cbte_tipo}_{payload.cbte_nro}.pdf"
+    try:
+        pdf_bytes = _build_real_invoice_pdf(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("PDF build error: %s\n%s", str(e), traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"No se pudo generar PDF: {e}")
 
+    filename = f"factura_{_norm_cuit(payload.cuit)}_{payload.pto_vta}_{payload.cbte_tipo}_{payload.cbte_nro}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -2034,10 +2263,7 @@ def wsfe_pdf_endpoint(
 
 
 # ============================================================
-# WSFE EMAIL (enviar comprobante PDF al cliente)
-#   - UNIFICADO (sin duplicados) ✅
-#   - Mantiene el contrato que usa tu FRONT:
-#       { "to_email": "...", "pdf_payload": { ... } }
+# WSFE EMAIL (adjunta el PDF REAL) — /wsfe/email
 # ============================================================
 class WsfeEmailRequest(BaseModel):
     to_email: str
@@ -2124,16 +2350,11 @@ def _send_email_with_pdf_resend(to_email: str, subject: str, text: str, html: st
         "html": html,
         "attachments": [{"filename": filename, "content": att_b64}],
     }
-    resp = resend.Emails.send(params)
-    return resp
+    return resend.Emails.send(params)
 
 
 @app.post("/wsfe/email")
-def wsfe_email_endpoint(
-    payload: WsfeEmailRequest,
-    x_api_key: str = Header(default=""),
-    authorization: str = Header(default=""),
-):
+def wsfe_email_endpoint(payload: WsfeEmailRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -2141,18 +2362,18 @@ def wsfe_email_endpoint(
     if not to_email or "@" not in to_email:
         raise HTTPException(status_code=400, detail="to_email inválido.")
 
+    # armamos el PDF REAL con el mismo payload que usa /wsfe/pdf
     try:
         pdf_req = WsfePdfRequest(**(payload.pdf_payload or {}))
-        pdf_bytes = _build_simple_invoice_pdf(pdf_req)
+        pdf_bytes = _build_real_invoice_pdf(pdf_req)
         filename = f"factura_{_norm_cuit(pdf_req.cuit)}_{pdf_req.pto_vta}_{pdf_req.cbte_tipo}_{pdf_req.cbte_nro}.pdf"
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"pdf_payload inválido o incompleto: {e}")
 
     subject = "Comprobante electrónico (LexaCAE)"
-    text = (
-        "Adjuntamos el comprobante electrónico.\n\n"
-        "Si necesitás ayuda o reenvío, respondé a este correo.\n"
-    )
+    text = "Adjuntamos el comprobante electrónico en PDF.\n\nSi necesitás ayuda o reenvío, respondé a este correo.\n"
     html = (
         "<div style='font-family: Arial, sans-serif; line-height:1.5'>"
         "<h3>Comprobante electrónico</h3>"
@@ -2183,5 +2404,7 @@ def wsfe_email_endpoint(
             return {"ok": True, "provider": "resend", "to": to_email, "filename": filename, "resend": resp}
 
         raise RuntimeError(f"EMAIL_PROVIDER no soportado para adjuntos: {provider}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
