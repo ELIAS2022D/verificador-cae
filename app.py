@@ -5,8 +5,8 @@ import re
 import logging
 import traceback
 import base64
+import hashlib
 from datetime import datetime
-
 import pandas as pd
 import streamlit as st
 import pdfplumber
@@ -1085,6 +1085,43 @@ def _money_fmt(x: float) -> str:
         return str(x)
 
 # ===================== PÁGINA: FACTURACIÓN WSFEv1 =====================
+def _clean_b64(b64: str) -> str:
+    if not b64:
+        return ""
+    return "".join(str(b64).strip().split())
+
+def _mask_b64(b64: str, visible: int = 10) -> str:
+    b64 = _clean_b64(b64)
+    if not b64:
+        return ""
+    if len(b64) <= visible * 2:
+        return "•" * len(b64)
+    return b64[:visible] + "..." + b64[-visible:]
+
+def _load_file_to_b64(uploaded_file) -> str:
+    return base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+
+def _file_hash(uploaded_file) -> str:
+    return hashlib.md5(uploaded_file.getvalue()).hexdigest()
+
+def ensure_wsfe_secrets_state():
+    if "wsfe_secrets" not in st.session_state:
+        st.session_state.wsfe_secrets = {
+            "cert_b64": "",
+            "cert_loaded": False,
+            "cert_source": "",
+            "cert_len": 0,
+            "cert_hash": "",
+            "show_cert": False,
+
+            "key_b64": "",
+            "key_loaded": False,
+            "key_source": "",
+            "key_len": 0,
+            "key_hash": "",
+            "show_key": False,
+        }
+
 def render_facturacion():
     lex_card_open()
     st.info(
@@ -1099,120 +1136,153 @@ def render_facturacion():
     cuit_tenant = st.text_input("CUIT emisor (11 dígitos, sin guiones)", key="ten_cuit")
     enabled = st.checkbox("Habilitado", value=True, key="ten_enabled")
 
-    # ===== Enterprise Secret Inputs (Opción B) =====
-    sec = st.session_state.wsfe_secrets
+# ===== Enterprise Secret Inputs (Opción B - FIX LOOP) =====
+ensure_wsfe_secrets_state()
+sec = st.session_state.wsfe_secrets
 
-    st.markdown("### Credenciales (seguras)")
-    st.caption("Por defecto quedan ocultas. Podés subir archivos o pegar base64, con toggle para mostrar/ocultar.")
+st.markdown("### Credenciales (seguras)")
+st.caption("Por defecto quedan ocultas. Podés subir archivos o pegar base64, con toggle para mostrar/ocultar.")
 
-    tab1, tab2 = st.tabs(["Certificado (CERT_B64)", "Clave privada (KEY_B64)"])
+tab1, tab2 = st.tabs(["Certificado (CERT_B64)", "Clave privada (KEY_B64)"])
 
-    with tab1:
-        st.markdown("**CERT_B64**")
-        colA, colB, colC = st.columns([2, 1, 1])
+with tab1:
+    st.markdown("**CERT_B64**")
+    colA, colB, colC = st.columns([2, 1, 1])
 
-        with colA:
-            cert_file = st.file_uploader("Subir certificado (.pem / .crt / .cer / .der / .txt)", type=["pem", "crt", "cer", "der", "txt"], key="cert_file")
-        with colB:
-            sec["show_cert"] = st.toggle("Mostrar", value=bool(sec.get("show_cert")), key="toggle_show_cert")
-        with colC:
-            if st.button("Eliminar", use_container_width=True, key="btn_del_cert"):
-                sec["cert_b64"] = ""
-                sec["cert_loaded"] = False
-                sec["cert_source"] = ""
-                sec["cert_len"] = 0
-                toast_warn("Certificado eliminado.")
-                st.rerun()
+    with colA:
+        cert_file = st.file_uploader(
+            "Subir certificado (.pem / .crt / .cer / .der / .txt)",
+            type=["pem", "crt", "cer", "der", "txt"],
+            key="cert_file",
+        )
 
-        if cert_file is not None:
-            b64 = _load_file_to_b64(cert_file)
-            b64 = _clean_b64(b64)
+    with colB:
+        sec["show_cert"] = st.toggle("Mostrar", value=bool(sec.get("show_cert", False)), key="toggle_show_cert")
+
+    with colC:
+        if st.button("Eliminar", use_container_width=True, key="btn_del_cert"):
+            sec["cert_b64"] = ""
+            sec["cert_loaded"] = False
+            sec["cert_source"] = ""
+            sec["cert_len"] = 0
+            sec["cert_hash"] = ""
+            # limpia el uploader
+            st.session_state["cert_file"] = None
+            toast_warn("Certificado eliminado.")
+            st.rerun()
+
+    # --- CARGA DE ARCHIVO SIN LOOP ---
+    if cert_file is not None:
+        h = _file_hash(cert_file)
+        if sec.get("cert_hash") != h:
+            b64 = _clean_b64(_load_file_to_b64(cert_file))
             if b64:
                 sec["cert_b64"] = b64
                 sec["cert_loaded"] = True
                 sec["cert_source"] = f"archivo: {cert_file.name}"
                 sec["cert_len"] = len(b64)
+                sec["cert_hash"] = h
                 toast_ok("Certificado cargado desde archivo.")
-                st.rerun()
 
-        if not sec.get("cert_loaded") and not sec.get("cert_b64"):
-            st.info("No hay certificado cargado.")
-        else:
-            st.success(f"Certificado cargado ✅ ({sec.get('cert_source') or 'manual'})")
-            st.caption(f"Largo: {sec.get('cert_len') or len(_clean_b64(sec.get('cert_b64')))} chars · Vista: `{_mask_b64(sec.get('cert_b64'))}`")
+    # Estado
+    if not sec.get("cert_loaded") and not sec.get("cert_b64"):
+        st.info("No hay certificado cargado.")
+    else:
+        st.success(f"Certificado cargado ✅ ({sec.get('cert_source') or 'manual'})")
+        st.caption(f"Largo: {sec.get('cert_len') or len(_clean_b64(sec.get('cert_b64')))} chars · Vista: `{_mask_b64(sec.get('cert_b64'))}`")
 
-        # Pegar manual (por defecto oculto)
-        if sec.get("show_cert"):
-            st.text_area(
-                "CERT_B64 (visible)",
-                value=sec.get("cert_b64", ""),
-                height=140,
-                key="cert_b64_visible",
-                help="Pegá el base64 completo. Se limpia automáticamente al guardar.",
-            )
-            # sincronizar si el user lo edita
-            newv = _clean_b64(st.session_state.get("cert_b64_visible", ""))
-            sec["cert_b64"] = newv
-            sec["cert_loaded"] = bool(newv)
-            sec["cert_source"] = sec.get("cert_source") or ("manual" if newv else "")
-            sec["cert_len"] = len(newv)
-        else:
-            # para que sea 100% enterprise: no mostramos el contenido
-            st.text_input("CERT_B64", value="••••••••••••••••••••••", disabled=True, help="Oculto por seguridad (toggle 'Mostrar' para ver/editar).")
+    # Manual: visible/oculto
+    if sec.get("show_cert"):
+        val = st.text_area(
+            "CERT_B64 (visible)",
+            value=sec.get("cert_b64", ""),
+            height=140,
+            key="cert_b64_visible",
+            help="Pegá el base64 completo. Se limpia automáticamente.",
+        )
+        newv = _clean_b64(val)
+        sec["cert_b64"] = newv
+        sec["cert_loaded"] = bool(newv)
+        if newv and not sec.get("cert_source"):
+            sec["cert_source"] = "manual"
+        sec["cert_len"] = len(newv)
+    else:
+        st.text_input(
+            "CERT_B64",
+            value="••••••••••••••••••••••",
+            disabled=True,
+            help="Oculto por seguridad (toggle 'Mostrar' para ver/editar).",
+        )
 
-        st.caption("Tip: si pegás base64 con saltos de línea, lo limpiamos automáticamente.")
+    st.caption("Tip: si pegás base64 con saltos de línea, lo limpiamos automáticamente.")
 
     with tab2:
         st.markdown("**KEY_B64**")
         colA, colB, colC = st.columns([2, 1, 1])
 
         with colA:
-            key_file = st.file_uploader("Subir key (.key / .pem / .der / .txt)", type=["key", "pem", "der", "txt"], key="key_file")
+            key_file = st.file_uploader(
+                "Subir key (.key / .pem / .der / .txt)",
+                type=["key", "pem", "der", "txt"],
+                key="key_file",
+            )
+
         with colB:
-            sec["show_key"] = st.toggle("Mostrar", value=bool(sec.get("show_key")), key="toggle_show_key")
+            sec["show_key"] = st.toggle("Mostrar", value=bool(sec.get("show_key", False)), key="toggle_show_key")
+
         with colC:
             if st.button("Eliminar", use_container_width=True, key="btn_del_key"):
                 sec["key_b64"] = ""
                 sec["key_loaded"] = False
                 sec["key_source"] = ""
                 sec["key_len"] = 0
+                sec["key_hash"] = ""
+                st.session_state["key_file"] = None
                 toast_warn("Clave eliminada.")
                 st.rerun()
 
-        if key_file is not None:
-            b64 = _load_file_to_b64(key_file)
-            b64 = _clean_b64(b64)
+    # --- CARGA DE ARCHIVO SIN LOOP ---
+    if key_file is not None:
+        h = _file_hash(key_file)
+        if sec.get("key_hash") != h:
+            b64 = _clean_b64(_load_file_to_b64(key_file))
             if b64:
                 sec["key_b64"] = b64
                 sec["key_loaded"] = True
                 sec["key_source"] = f"archivo: {key_file.name}"
                 sec["key_len"] = len(b64)
+                sec["key_hash"] = h
                 toast_ok("Clave cargada desde archivo.")
-                st.rerun()
 
-        if not sec.get("key_loaded") and not sec.get("key_b64"):
-            st.info("No hay clave cargada.")
-        else:
-            st.success(f"Clave cargada ✅ ({sec.get('key_source') or 'manual'})")
-            st.caption(f"Largo: {sec.get('key_len') or len(_clean_b64(sec.get('key_b64')))} chars · Vista: `{_mask_b64(sec.get('key_b64'))}`")
+    if not sec.get("key_loaded") and not sec.get("key_b64"):
+        st.info("No hay clave cargada.")
+    else:
+        st.success(f"Clave cargada ✅ ({sec.get('key_source') or 'manual'})")
+        st.caption(f"Largo: {sec.get('key_len') or len(_clean_b64(sec.get('key_b64')))} chars · Vista: `{_mask_b64(sec.get('key_b64'))}`")
 
-        if sec.get("show_key"):
-            st.text_area(
-                "KEY_B64 (visible)",
-                value=sec.get("key_b64", ""),
-                height=140,
-                key="key_b64_visible",
-                help="Pegá el base64 completo. Se limpia automáticamente al guardar.",
-            )
-            newv = _clean_b64(st.session_state.get("key_b64_visible", ""))
-            sec["key_b64"] = newv
-            sec["key_loaded"] = bool(newv)
-            sec["key_source"] = sec.get("key_source") or ("manual" if newv else "")
-            sec["key_len"] = len(newv)
-        else:
-            st.text_input("KEY_B64", value="••••••••••••••••••••••", disabled=True, help="Oculto por seguridad (toggle 'Mostrar' para ver/editar).")
+    if sec.get("show_key"):
+        val = st.text_area(
+            "KEY_B64 (visible)",
+            value=sec.get("key_b64", ""),
+            height=140,
+            key="key_b64_visible",
+            help="Pegá el base64 completo. Se limpia automáticamente.",
+        )
+        newv = _clean_b64(val)
+        sec["key_b64"] = newv
+        sec["key_loaded"] = bool(newv)
+        if newv and not sec.get("key_source"):
+            sec["key_source"] = "manual"
+        sec["key_len"] = len(newv)
+    else:
+        st.text_input(
+            "KEY_B64",
+            value="••••••••••••••••••••••",
+            disabled=True,
+            help="Oculto por seguridad (toggle 'Mostrar' para ver/editar).",
+        )
 
-        st.caption("Tip: evitá compartir esta clave. Guardala como secreto en el backend siempre que puedas.")
+    st.caption("Tip: evitá compartir esta clave. Guardala como secreto en el backend siempre que puedas.")
 
     st.session_state.wsfe_secrets = sec
 
