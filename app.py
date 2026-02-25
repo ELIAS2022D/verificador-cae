@@ -1,18 +1,10 @@
-# app.py — LexaCAE Front (Streamlit) Enterprise
-# ------------------------------------------------------------
-# ✅ UI enterprise (tema claro + cards + botones)
-# ✅ Login + Perfil + Validación WSCDC
-# ✅ Facturación WSFEv1: Tenant (CUIT + CERT/KEY base64) + Emitir CAE + PDF clásico + Email
-# ✅ CERT/KEY: soporte "pegar base64" + "subir archivo .pem/.key/.crt/.der" (lo convierte a base64)
-# ✅ API Key: se toma de ENV (no se muestra)
-# ------------------------------------------------------------
-
 import os
 import io
 import zipfile
 import re
 import logging
 import traceback
+import base64
 from datetime import datetime
 
 import pandas as pd
@@ -34,6 +26,12 @@ if not logger.handlers:
 
 # ===================== UI HELPERS (enterprise + errores prolijos) =====================
 def inject_enterprise_theme_light():
+    """
+    Tema claro enterprise (default white) combinando acentos tipo LexaCAE:
+    - fondo blanco / gris muy claro
+    - cards blancas con borde suave
+    - acentos azul/cian
+    """
     st.markdown(
         """
         <style>
@@ -46,6 +44,7 @@ def inject_enterprise_theme_light():
             --lx-muted: rgba(15,23,42,.62);
             --lx-accent: #2563eb;
             --lx-accent2: #06b6d4;
+            --lx-accent3: #4f46e5;
             --lx-shadow: 0 18px 50px rgba(15,23,42,.10);
           }
 
@@ -197,6 +196,7 @@ def block_enter_on_password_inputs():
               }, true);
             });
           }
+
           attach();
           const obs = new MutationObserver(() => attach());
           obs.observe(window.parent.document.body, { childList: true, subtree: true });
@@ -207,11 +207,7 @@ def block_enter_on_password_inputs():
     )
 
 # ===================== BRANDING + CONFIG =====================
-icon = None
-try:
-    icon = Image.open("assets/logo_Sitio.png")
-except Exception:
-    icon = "✅"
+icon = Image.open("assets/logo_Sitio.png")
 
 st.set_page_config(
     page_title="LexaCAE | Verificador CAE",
@@ -224,17 +220,14 @@ inject_enterprise_theme_light()
 # ===================== HERO / HEADER =====================
 col1, col2 = st.columns([1, 2], vertical_alignment="center")
 with col1:
-    try:
-        st.image("assets/favicon.png", width=260)
-    except Exception:
-        st.markdown("### LexaCAE")
+    st.image("assets/favicon.png", width=260)
 with col2:
     lex_card_open()
     st.markdown(
         """
-        <div class="lex-badge">🛡️ Compliance • AFIP WSCDC/WSFEv1 • Auditoría</div>
+        <div class="lex-badge">🛡️ Compliance • AFIP WSCDC • Auditoría</div>
         <p class="lex-title" style="margin-top:10px;">LexaCAE — Verificador CAE</p>
-        <p class="lex-sub">Validación en la nube con verificación oficial contra AFIP. Emisión de comprobantes WSFEv1 + PDF clásico.</p>
+        <p class="lex-sub">Validación en la nube, con verificación oficial contra AFIP. Flujo simple, resultados exportables y control de plan.</p>
         """,
         unsafe_allow_html=True,
     )
@@ -246,8 +239,8 @@ block_enter_on_password_inputs()
 # ===================== CONFIG APP =====================
 st.title("Verificador de CAE")
 
-BASE_URL = os.getenv("BASE_URL", "").strip().rstrip("/")
-DEFAULT_BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "").strip()  # ✅ se usa pero no se muestra
+BASE_URL = os.getenv("BASE_URL", "").strip()
+DEFAULT_BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "").strip()
 LOGIN_CUIT_DEFAULT = os.getenv("LOGIN_CUIT_DEFAULT", "").strip()
 
 MAX_FILES_RAW = os.getenv("MAX_FILES", None)
@@ -255,37 +248,6 @@ BATCH_SIZE_RAW = os.getenv("BATCH_SIZE", "50")
 
 RENEW_WHATSAPP = (os.getenv("RENEW_WHATSAPP", "5491131433906") or "").strip()
 RENEW_TEXT = (os.getenv("RENEW_TEXT", "Hola! Quiero renovar mi plan de LexaCAE. ¿Me ayudan?") or "").strip()
-
-SUPPORT_WHATSAPP = (os.getenv("SUPPORT_WHATSAPP", RENEW_WHATSAPP) or "5491131433906").strip()
-SUPPORT_TEXT = (os.getenv(
-    "SUPPORT_TEXT",
-    "Hola! Necesito soporte con LexaCAE. Mi CUIT es: ____ . Detalle/Problema: ____ ."
-) or "").strip()
-SUPPORT_BUBBLE = (os.getenv("SUPPORT_BUBBLE", "Soporte técnico") or "Soporte técnico").strip()
-
-def _parse_int_or_none(x):
-    try:
-        if x is None:
-            return None
-        if isinstance(x, str) and x.strip() == "":
-            return None
-        return int(x)
-    except Exception:
-        return None
-
-MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
-
-try:
-    BATCH_SIZE = int(BATCH_SIZE_RAW)
-except Exception:
-    BATCH_SIZE = 50
-
-if BATCH_SIZE <= 0:
-    BATCH_SIZE = 50
-
-if not BASE_URL:
-    st.error("Falta BASE_URL en Render (Environment Variables). Ej: https://tu-backend.onrender.com")
-    st.stop()
 
 # ===================== WHATSAPP FLOTANTE (GLOBAL) =====================
 def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: str = "Soporte técnico"):
@@ -313,6 +275,7 @@ def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: 
             gap: 10px;
             font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
           }}
+
           .wa-bubble {{
             background: rgba(15, 23, 42, 0.92);
             color: #fff;
@@ -324,6 +287,7 @@ def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: 
             border: 1px solid rgba(255,255,255,.12);
             white-space: nowrap;
           }}
+
           .wa-btn {{
             width: 56px;
             height: 56px;
@@ -341,7 +305,13 @@ def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: 
             transform: translateY(-2px);
             box-shadow: 0 18px 36px rgba(0,0,0,.22);
           }}
-          .wa-icon {{ width: 28px; height: 28px; fill: white; }}
+
+          .wa-icon {{
+            width: 28px;
+            height: 28px;
+            fill: white;
+          }}
+
           @media (max-width: 720px) {{
             .wa-bubble {{ display: none; }}
             .wa-btn {{ width: 54px; height: 54px; }}
@@ -361,13 +331,39 @@ def inject_whatsapp_floating_button(phone: str, default_text: str, bubble_text: 
         unsafe_allow_html=True,
     )
 
+SUPPORT_WHATSAPP = (os.getenv("SUPPORT_WHATSAPP", RENEW_WHATSAPP) or "5491131433906").strip()
+SUPPORT_TEXT = (os.getenv(
+    "SUPPORT_TEXT",
+    "Hola! Necesito soporte con LexaCAE. Mi CUIT es: ____ . Detalle/Problema: ____ ."
+) or "").strip()
+SUPPORT_BUBBLE = (os.getenv("SUPPORT_BUBBLE", "Soporte técnico") or "Soporte técnico").strip()
+
 inject_whatsapp_floating_button(SUPPORT_WHATSAPP, SUPPORT_TEXT, SUPPORT_BUBBLE)
 
-def _wa_renew_url() -> str:
-    import urllib.parse
-    phone = re.sub(r"\D+", "", RENEW_WHATSAPP or "") or "5491131433906"
-    txt = urllib.parse.quote(RENEW_TEXT or "")
-    return f"https://wa.me/{phone}?text={txt}"
+def _parse_int_or_none(x):
+    try:
+        if x is None:
+            return None
+        if isinstance(x, str) and x.strip() == "":
+            return None
+        return int(x)
+    except Exception:
+        return None
+
+MAX_FILES = _parse_int_or_none(MAX_FILES_RAW)
+
+try:
+    BATCH_SIZE = int(BATCH_SIZE_RAW)
+except Exception:
+    BATCH_SIZE = 50
+
+if BATCH_SIZE <= 0:
+    BATCH_SIZE = 50
+
+BASE_URL = BASE_URL.rstrip("/")
+if not BASE_URL:
+    st.error("Falta BASE_URL en Render (Environment Variables). Ej: https://tu-backend.onrender.com")
+    st.stop()
 
 # ===================== EXTRACCIÓN PDF (LOCAL) =====================
 CAE_PATTERNS = [
@@ -422,48 +418,69 @@ def extract_text_pdf(file_bytes: bytes, max_pages: int = 5) -> str:
             texts.append(page.extract_text() or "")
         return "\n".join(texts)
 
-# ===================== CERT/KEY HELPERS (enterprise) =====================
-def _b64_clean(s: str) -> str:
-    """Aguanta base64 con saltos de línea / espacios."""
-    if not s:
-        return ""
-    s2 = re.sub(r"\s+", "", s.strip())
-    return s2
-
-def file_to_b64(uploaded_file) -> str:
-    """Lee archivo PEM/DER/KEY/CRT y lo convierte a base64."""
-    if not uploaded_file:
-        return ""
-    b = uploaded_file.getvalue()
-    if not b:
-        return ""
-    import base64
-    return base64.b64encode(b).decode("utf-8")
-
-def _mask_b64(s: str) -> str:
-    s = (s or "").strip()
-    if len(s) <= 20:
-        return "••••"
-    return f"{s[:10]}••••••••{s[-10:]}"
-
 # ===================== SESSION STATE =====================
 def ensure_auth_state():
     if "auth" not in st.session_state:
         st.session_state.auth = {
             "logged": False,
-            "api_key": DEFAULT_BACKEND_API_KEY,  # ✅ no se muestra
+            "api_key": DEFAULT_BACKEND_API_KEY,
             "access_token": "",
             "cuit": "",
         }
+
 ensure_auth_state()
 
-# items para PDF (facturación)
+# NUEVO: items para PDF (facturación)
 def ensure_wsfe_items_state():
     if "wsfe_items_df" not in st.session_state:
         st.session_state.wsfe_items_df = pd.DataFrame(
             columns=["Descripción", "Cantidad", "Precio Unit.", "Subtotal"]
         )
+
 ensure_wsfe_items_state()
+
+# NUEVO: secretos tenant (enterprise)
+def ensure_wsfe_secrets_state():
+    if "wsfe_secrets" not in st.session_state:
+        st.session_state.wsfe_secrets = {
+            "cert_b64": "",
+            "key_b64": "",
+            "show_cert": False,
+            "show_key": False,
+            "cert_loaded": False,
+            "key_loaded": False,
+            "cert_source": "",
+            "key_source": "",
+            "cert_len": 0,
+            "key_len": 0,
+        }
+
+ensure_wsfe_secrets_state()
+
+def _clean_b64(s: str) -> str:
+    return re.sub(r"\s+", "", (s or "").strip())
+
+def _mask_b64(s: str, keep: int = 6) -> str:
+    s = _clean_b64(s)
+    if not s:
+        return ""
+    if len(s) <= keep * 2:
+        return "•" * len(s)
+    return f"{s[:keep]}{'•' * 14}{s[-keep:]}"
+
+def _load_file_to_b64(uploaded_file) -> str:
+    if not uploaded_file:
+        return ""
+    raw = uploaded_file.getvalue()
+    # Si el archivo ya es base64 (texto), lo respetamos.
+    try:
+        txt = raw.decode("utf-8", errors="ignore").strip()
+        # heurística: si tiene muchos chars base64, lo tomamos como base64
+        if len(txt) > 80 and re.fullmatch(r"[A-Za-z0-9+/=\s\r\n]+", txt):
+            return _clean_b64(txt)
+    except Exception:
+        pass
+    return base64.b64encode(raw).decode("utf-8")
 
 # ===================== BACKEND CALLS =====================
 def backend_login(base_url: str, api_key: str, cuit: str, password: str) -> str:
@@ -586,11 +603,17 @@ def chunk_list(items, size: int):
         return [items]
     return [items[i : i + size] for i in range(0, len(items), size)]
 
+def _wa_renew_url() -> str:
+    import urllib.parse
+    phone = re.sub(r"\D+", "", RENEW_WHATSAPP or "")
+    if not phone:
+        phone = "5491131433906"
+    txt = urllib.parse.quote(RENEW_TEXT or "")
+    return f"https://wa.me/{phone}?text={txt}"
+
 # ===================== SIDEBAR: LOGIN + NAV =====================
 with st.sidebar:
     st.subheader("Acceso")
-
-    # ✅ API Key no se muestra (enterprise); se usa desde ENV
     api_key = st.session_state.auth["api_key"]
 
     cuit_login = st.text_input(
@@ -755,6 +778,11 @@ def render_validacion():
 
     st.subheader("Uso del plan")
 
+    plan_used = None
+    plan_limit = None
+    plan_remaining = None
+    plan_blocked = False
+
     def _fmt_yyyy_mm_from_iso(s: str) -> str:
         s = (s or "").strip()
         if not s:
@@ -775,11 +803,9 @@ def render_validacion():
         total_updated_at_raw = usage_total.get("updated_at", "") or ""
         total_updated_at = _fmt_yyyy_mm_from_iso(total_updated_at_raw)
 
-        FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))  # solo para mostrar
+        FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
         plan_used = total_files
         plan_limit = FRONT_PLAN_LIMIT
-        plan_remaining = None
-        plan_blocked = False
         if plan_limit is not None:
             plan_remaining = max(0, int(plan_limit) - int(plan_used))
             plan_blocked = plan_used >= plan_limit
@@ -926,9 +952,11 @@ def render_validacion():
 
     st.subheader("Validación contra AFIP")
     st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
-    st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDF.")
+    st.caption(f"Para evitar demoras, procesamos los archivos en tandas de {BATCH_SIZE} PDF (ajustable).")
 
-    if st.button("Validar ahora", use_container_width=True, key="btn_validar"):
+    button_disabled = False
+
+    if st.button("Validar ahora", use_container_width=True, disabled=button_disabled, key="btn_validar"):
         if not pdf_files:
             toast_err("Primero cargá PDF o un ZIP.")
             st.stop()
@@ -966,41 +994,43 @@ def render_validacion():
             if all_rows:
                 status.update(label="Validación completada.", state="complete")
                 toast_ok("AFIP OK — resultados listos.")
-                df2 = pd.DataFrame(all_rows)
-                st.dataframe(df2, use_container_width=True)
-
-                # descargas
-                st.subheader("Descargas")
-                col1, col2 = st.columns(2)
-
-                if "CAE" in df2.columns:
-                    df2["CAE"] = df2["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
-
-                with col1:
-                    csv_bytes = df2.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-                    st.download_button(
-                        "Descargar CSV (.csv)",
-                        data=csv_bytes,
-                        file_name="resultado_verificacion_cae.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-
-                with col2:
-                    xlsx_buffer = io.BytesIO()
-                    with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
-                        df2.to_excel(writer, index=False, sheet_name="Resultados")
-                    st.download_button(
-                        "Descargar Excel (.xlsx)",
-                        data=xlsx_buffer.getvalue(),
-                        file_name="resultado_verificacion_cae.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
+                df = pd.DataFrame(all_rows)
+                st.dataframe(df, use_container_width=True)
             else:
                 if getattr(status, "_state", "") != "error":
                     status.update(label="Sin resultados para mostrar.", state="complete")
                 toast_warn("No hubo resultados para mostrar (probá de nuevo).")
+
+    if not df.empty:
+        if "CAE" in df.columns:
+            df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+        if "Estado" in df.columns:
+            df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
+
+        st.subheader("Descargas")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+            st.download_button(
+                "Descargar CSV (.csv)",
+                data=csv_bytes,
+                file_name="resultado_verificacion_cae.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col2:
+            xlsx_buffer = io.BytesIO()
+            with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
+                df.to_excel(writer, index=False, sheet_name="Resultados")
+            st.download_button(
+                "Descargar Excel (.xlsx)",
+                data=xlsx_buffer.getvalue(),
+                file_name="resultado_verificacion_cae.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
 # ===================== HELPERS ITEMS (PDF) =====================
 def _safe_float(x, default=0.0):
@@ -1064,73 +1094,163 @@ def render_facturacion():
     lex_card_close()
 
     st.subheader("1) Configurar emisor (CUIT + Certificado)")
-    st.caption("Guarda/actualiza credenciales del cliente (tenant). Recomendado: admin/soporte.")
+    st.caption("Esto guarda/actualiza credenciales del cliente en el backend (tenant). Recomendado: que lo haga un admin/soporte.")
 
     cuit_tenant = st.text_input("CUIT emisor (11 dígitos, sin guiones)", key="ten_cuit")
-
-    # ✅ Enterprise: dos modos para cert/key (subir archivo o pegar base64)
-    st.markdown("**Certificado**")
-    colc1, colc2 = st.columns([1, 2])
-    with colc1:
-        cert_file = st.file_uploader("Subir CERT (.pem/.crt/.cer/.der)", type=["pem", "crt", "cer", "der"], key="ten_cert_file")
-    with colc2:
-        cert_b64 = st.text_area("CERT_B64 (base64)", height=120, key="ten_cert")
-
-    if cert_file:
-        cert_b64 = file_to_b64(cert_file)
-        st.session_state["ten_cert"] = cert_b64
-        st.caption(f"Cert cargado: {cert_file.name} · base64: {_mask_b64(cert_b64)}")
-
-    st.markdown("**Clave privada**")
-    colk1, colk2 = st.columns([1, 2])
-    with colk1:
-        key_file = st.file_uploader("Subir KEY (.key/.pem/.der)", type=["key", "pem", "der"], key="ten_key_file")
-    with colk2:
-        key_b64 = st.text_area("KEY_B64 (base64)", height=120, key="ten_key")
-
-    if key_file:
-        key_b64 = file_to_b64(key_file)
-        st.session_state["ten_key"] = key_b64
-        st.caption(f"Key cargada: {key_file.name} · base64: {_mask_b64(key_b64)}")
-
     enabled = st.checkbox("Habilitado", value=True, key="ten_enabled")
+
+    # ===== Enterprise Secret Inputs (Opción B) =====
+    sec = st.session_state.wsfe_secrets
+
+    st.markdown("### Credenciales (seguras)")
+    st.caption("Por defecto quedan ocultas. Podés subir archivos o pegar base64, con toggle para mostrar/ocultar.")
+
+    tab1, tab2 = st.tabs(["Certificado (CERT_B64)", "Clave privada (KEY_B64)"])
+
+    with tab1:
+        st.markdown("**CERT_B64**")
+        colA, colB, colC = st.columns([2, 1, 1])
+
+        with colA:
+            cert_file = st.file_uploader("Subir certificado (.pem / .crt / .cer / .der / .txt)", type=["pem", "crt", "cer", "der", "txt"], key="cert_file")
+        with colB:
+            sec["show_cert"] = st.toggle("Mostrar", value=bool(sec.get("show_cert")), key="toggle_show_cert")
+        with colC:
+            if st.button("Eliminar", use_container_width=True, key="btn_del_cert"):
+                sec["cert_b64"] = ""
+                sec["cert_loaded"] = False
+                sec["cert_source"] = ""
+                sec["cert_len"] = 0
+                toast_warn("Certificado eliminado.")
+                st.rerun()
+
+        if cert_file is not None:
+            b64 = _load_file_to_b64(cert_file)
+            b64 = _clean_b64(b64)
+            if b64:
+                sec["cert_b64"] = b64
+                sec["cert_loaded"] = True
+                sec["cert_source"] = f"archivo: {cert_file.name}"
+                sec["cert_len"] = len(b64)
+                toast_ok("Certificado cargado desde archivo.")
+                st.rerun()
+
+        if not sec.get("cert_loaded") and not sec.get("cert_b64"):
+            st.info("No hay certificado cargado.")
+        else:
+            st.success(f"Certificado cargado ✅ ({sec.get('cert_source') or 'manual'})")
+            st.caption(f"Largo: {sec.get('cert_len') or len(_clean_b64(sec.get('cert_b64')))} chars · Vista: `{_mask_b64(sec.get('cert_b64'))}`")
+
+        # Pegar manual (por defecto oculto)
+        if sec.get("show_cert"):
+            st.text_area(
+                "CERT_B64 (visible)",
+                value=sec.get("cert_b64", ""),
+                height=140,
+                key="cert_b64_visible",
+                help="Pegá el base64 completo. Se limpia automáticamente al guardar.",
+            )
+            # sincronizar si el user lo edita
+            newv = _clean_b64(st.session_state.get("cert_b64_visible", ""))
+            sec["cert_b64"] = newv
+            sec["cert_loaded"] = bool(newv)
+            sec["cert_source"] = sec.get("cert_source") or ("manual" if newv else "")
+            sec["cert_len"] = len(newv)
+        else:
+            # para que sea 100% enterprise: no mostramos el contenido
+            st.text_input("CERT_B64", value="••••••••••••••••••••••", disabled=True, help="Oculto por seguridad (toggle 'Mostrar' para ver/editar).")
+
+        st.caption("Tip: si pegás base64 con saltos de línea, lo limpiamos automáticamente.")
+
+    with tab2:
+        st.markdown("**KEY_B64**")
+        colA, colB, colC = st.columns([2, 1, 1])
+
+        with colA:
+            key_file = st.file_uploader("Subir key (.key / .pem / .der / .txt)", type=["key", "pem", "der", "txt"], key="key_file")
+        with colB:
+            sec["show_key"] = st.toggle("Mostrar", value=bool(sec.get("show_key")), key="toggle_show_key")
+        with colC:
+            if st.button("Eliminar", use_container_width=True, key="btn_del_key"):
+                sec["key_b64"] = ""
+                sec["key_loaded"] = False
+                sec["key_source"] = ""
+                sec["key_len"] = 0
+                toast_warn("Clave eliminada.")
+                st.rerun()
+
+        if key_file is not None:
+            b64 = _load_file_to_b64(key_file)
+            b64 = _clean_b64(b64)
+            if b64:
+                sec["key_b64"] = b64
+                sec["key_loaded"] = True
+                sec["key_source"] = f"archivo: {key_file.name}"
+                sec["key_len"] = len(b64)
+                toast_ok("Clave cargada desde archivo.")
+                st.rerun()
+
+        if not sec.get("key_loaded") and not sec.get("key_b64"):
+            st.info("No hay clave cargada.")
+        else:
+            st.success(f"Clave cargada ✅ ({sec.get('key_source') or 'manual'})")
+            st.caption(f"Largo: {sec.get('key_len') or len(_clean_b64(sec.get('key_b64')))} chars · Vista: `{_mask_b64(sec.get('key_b64'))}`")
+
+        if sec.get("show_key"):
+            st.text_area(
+                "KEY_B64 (visible)",
+                value=sec.get("key_b64", ""),
+                height=140,
+                key="key_b64_visible",
+                help="Pegá el base64 completo. Se limpia automáticamente al guardar.",
+            )
+            newv = _clean_b64(st.session_state.get("key_b64_visible", ""))
+            sec["key_b64"] = newv
+            sec["key_loaded"] = bool(newv)
+            sec["key_source"] = sec.get("key_source") or ("manual" if newv else "")
+            sec["key_len"] = len(newv)
+        else:
+            st.text_input("KEY_B64", value="••••••••••••••••••••••", disabled=True, help="Oculto por seguridad (toggle 'Mostrar' para ver/editar).")
+
+        st.caption("Tip: evitá compartir esta clave. Guardala como secreto en el backend siempre que puedas.")
+
+    st.session_state.wsfe_secrets = sec
 
     colx1, colx2 = st.columns(2)
     with colx1:
         if st.button("Guardar emisor", use_container_width=True, key="btn_tenant_save"):
-            cuit_clean = re.sub(r"\D+", "", cuit_tenant or "")
-            cert_clean = _b64_clean(st.session_state.get("ten_cert", "") or cert_b64)
-            key_clean = _b64_clean(st.session_state.get("ten_key", "") or key_b64)
+            cert_b64 = _clean_b64(sec.get("cert_b64", ""))
+            key_b64 = _clean_b64(sec.get("key_b64", ""))
 
-            if not re.fullmatch(r"\d{11}", cuit_clean):
-                toast_err("CUIT inválido. Debe tener 11 dígitos.")
-                return
-            if not cert_clean or not key_clean:
-                toast_err("Faltan CERT_B64 y/o KEY_B64.")
-                return
+            if not (cuit_tenant or "").strip():
+                toast_err("Ingresá el CUIT emisor.")
+                st.stop()
+            if not cert_b64 or not key_b64:
+                toast_err("Falta cargar CERT_B64 y/o KEY_B64.")
+                st.stop()
 
             with st.spinner("Guardando emisor..."):
                 resp = safe_call(
                     "No pudimos guardar el emisor (tenant). Verificá los datos e intentá de nuevo.",
                     backend_tenant_upsert,
                     BASE_URL, st.session_state.auth["api_key"], st.session_state.auth["access_token"],
-                    cuit_clean, cert_clean, key_clean, enabled
+                    str(cuit_tenant).strip(), cert_b64, key_b64, enabled
                 )
             if resp:
                 toast_ok("Emisor guardado correctamente.")
                 st.json(resp)
 
     with colx2:
-        st.caption("Tip: podés pegar el base64 entero o subir los archivos. Si viene con saltos de línea, no pasa nada.")
+        st.caption("Tip: podés subir archivos PEM/DER. Si pegás base64, queda oculto por defecto (toggle para mostrar).")
 
     st.divider()
 
     st.subheader("2) Emitir comprobante (FECAESolicitar)")
-    st.caption("WSFEv1 autoriza por totales. Ítems se usan para un PDF profesional (no impacta en AFIP).")
+    st.caption("WSFEv1 autoriza por totales. El detalle de ítems lo usamos para que el PDF quede profesional (no se envía a AFIP).")
 
-    cuit_emit = st.text_input("CUIT emisor (tenant)", value=(re.sub(r"\D+", "", cuit_tenant or "")), key="emit_cuit")
+    cuit_emit = st.text_input("CUIT emisor (tenant)", value=cuit_tenant or "", key="emit_cuit")
     pto_vta = st.number_input("Punto de venta", min_value=1, max_value=99999, value=1, step=1, key="emit_ptovta")
-    cbte_tipo = st.number_input("Tipo comprobante (11=C / 1=A / 6=B)", min_value=1, max_value=999, value=11, step=1, key="emit_tipo")
+    cbte_tipo = st.number_input("Tipo comprobante (ej: 11=Factura C / 1=Factura A / 6=Factura B)", min_value=1, max_value=999, value=11, step=1, key="emit_tipo")
     concepto = st.selectbox(
         "Concepto",
         options=[1, 2, 3],
@@ -1160,7 +1280,7 @@ def render_facturacion():
             num_rows="dynamic",
             key="wsfe_items_editor",
             column_config={
-                "Descripción": st.column_config.TextColumn("Descripción", help="Detalle del producto/servicio"),
+                "Descripción": st.column_config.TextColumn("Descripción", help="Detalle del producto/servicio", required=False),
                 "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.0, step=1.0, format="%.2f"),
                 "Precio Unit.": st.column_config.NumberColumn("Precio Unit.", min_value=0.0, step=1.0, format="%.2f"),
                 "Subtotal": st.column_config.NumberColumn("Subtotal", help="Se recalcula automáticamente", disabled=True, format="%.2f"),
@@ -1189,8 +1309,8 @@ def render_facturacion():
         auto_fill = st.checkbox("Autocompletar ImpNeto/ImpTotal desde ítems", value=False, key="items_auto_fill")
 
     st.divider()
-    st.markdown("### Importes (totales para AFIP)")
 
+    st.markdown("### Importes (totales para AFIP)")
     colm1, colm2, colm3 = st.columns(3)
     with colm1:
         imp_total = st.number_input("ImpTotal", min_value=0.0, value=0.0, step=1.0, key="emit_total")
@@ -1240,7 +1360,7 @@ def render_facturacion():
     if use_iva:
         coliv1, coliv2, coliv3 = st.columns(3)
         with coliv1:
-            iva_id = st.number_input("Id alícuota (5=21%, 4=10.5%, 3=0%)", min_value=1, max_value=999, value=5, step=1, key="emit_iva_id")
+            iva_id = st.number_input("Id alícuota (ej: 5=21%, 4=10.5%, 3=0%)", min_value=1, max_value=999, value=5, step=1, key="emit_iva_id")
         with coliv2:
             iva_base = st.number_input("BaseImp", min_value=0.0, value=0.0, step=1.0, key="emit_iva_base")
         with coliv3:
@@ -1346,10 +1466,7 @@ def render_facturacion():
                         "cae": cae,
                         "cae_vto": cae_vto,
                         "resultado": resp.get("resultado"),
-                        "items": items_payload,  # ✅ clave para backend /wsfe/pdf
-                        # opcionales para receptor (si querés)
-                        "razon_social": "Cliente",
-                        "domicilio": "—",
+                        "items": items_payload,  # backend /wsfe/pdf debe soportar items
                     })
 
                     colpdf1, colpdf2 = st.columns(2)
@@ -1412,8 +1529,8 @@ def render_facturacion():
                                     st.json(resp_mail)
 
                     with colmail2:
-                        st.caption("Requiere backend **POST /wsfe/email** + SMTP/Resend/Brevo configurado.")
-                        st.caption("El detalle de ítems se envía en `pdf_payload.items`.")
+                        st.caption("Requiere endpoint backend **POST /wsfe/email** + SMTP configurado en el backend.")
+                        st.caption("El detalle de ítems se envía dentro de `pdf_payload.items`.")
 
 # ===================== ROUTER =====================
 if page == "Perfil":
