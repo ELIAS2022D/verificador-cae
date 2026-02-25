@@ -2159,10 +2159,14 @@ def _build_invoice_pdf_clasico(data: WsfePdfRequest) -> bytes:
     c.drawString(x0 + 5 * mm, y - 7 * mm, "RECEPTOR")
     c.setFont("Helvetica", 9)
     c.drawString(x0 + 5 * mm, y - 13 * mm, f"Razón Social: {str(data.razon_social).strip()}")
+
+    doc_nro_clean = re.sub(r"\D+", "", str(data.doc_nro or ""))
+    domicilio_txt = str(getattr(data, "domicilio", "") or "").strip()
+
     c.drawString(
         x0 + 5 * mm,
         y - 18 * mm,
-        f"Doc: {int(data.doc_tipo)} - {re.sub(r'\\D+', '', str(data.doc_nro))}   Domicilio: {str(data.domicilio).strip()}",
+        f"Doc: {int(data.doc_tipo)} - {doc_nro_clean}   Domicilio: {domicilio_txt}",
     )
 
     y -= rec_h + 6 * mm
