@@ -1,23 +1,9 @@
-# main.py — LexaCAE Backend (alineado con tu FRONT + PDF “real” con ítems)
-#
-# ✅ Compatible con tu front actual:
-#   - /auth/login
-#   - /me, /me/change-password
-#   - /usage/current, /usage/total, /usage/email
-#   - /verify
-#   - /tenants/upsert
-#   - /wsfe/last, /wsfe/cae
-#   - /wsfe/pdf  (AHORA con items + totales validados + layout tipo factura)
-#   - /wsfe/email (adjunta el mismo PDF real)
-#
-# ✅ PLAN_LIMIT:
-#   - Se controla en /verify por cantidad de PDFs subidos (bolsa total)
-#   - /wsfe/* NO consume “files”, solo suma requests (como lo tenías)
-#
-# ⚠️ Nota:
-#   - AFIP WSFEv1 trabaja por totales; los ítems son para TU PDF “real” (y para tu sistema).
-#   - Si el front todavía no manda items, el PDF sale igual (solo totales).
-#   - Si manda items, se renderiza tabla y se valida que sumen con imp_total.
+# main.py — LexaCAE Backend (WSCDC + WSFEv1 + PDF CLÁSICO + Email + Perfil + Plan Limit)
+# -----------------------------------------------------------------------------------
+# ✅ Alineado con tu FRONT (pdf_payload incluye items[])
+# ✅ PDF estilo clásico (Factura A/B/C con encabezado + tabla + totales + CAE + QR AFIP)
+# ✅ PLAN_LIMIT aplica SOLO a /verify (como pediste)
+# -----------------------------------------------------------------------------------
 
 import os
 import io
@@ -29,8 +15,7 @@ import threading
 import sqlite3
 import logging
 import uuid
-import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import List, Optional, Dict, Any, Tuple
 
 import xml.etree.ElementTree as ET
@@ -64,13 +49,20 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 
-# ✅ PDF generación (endpoint /wsfe/pdf)
+# ✅ PDF generación
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
+from reportlab.lib import colors
 
-# ✅ Password hashing (para perfil + cambio contraseña)
+# ✅ QR AFIP en PDF (ReportLab)
+from reportlab.graphics.barcode import qr as rl_qr
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics import renderPDF
+
+# ✅ Password hashing (perfil + cambio contraseña sin tocar envs)
 from passlib.context import CryptContext
+
 
 # ============================================================
 # LOGGING
@@ -87,7 +79,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 app = FastAPI(
     title="LexaCAE Backend",
     version="1.0.0",
-    description="Validación CAE (WSCDC) + Emisión WSFEv1 + PDF real + Email + Perfil",
+    description="Validación CAE (WSCDC) + Emisión WSFEv1 + PDF clásico + Email + Perfil",
 )
 
 
@@ -144,63 +136,38 @@ def _now_iso_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _safe_float(x: Any, default: float = 0.0) -> float:
+def _safe_int(x, default=None):
     try:
         if x is None:
             return default
+        return int(str(x).strip())
+    except Exception:
+        return default
+
+
+def _safe_float(x, default=0.0) -> float:
+    try:
+        if x is None:
+            return default
+        if isinstance(x, str):
+            s = x.strip().replace(",", ".")
+            if not s:
+                return default
+            return float(s)
         return float(x)
     except Exception:
         return default
 
 
-def _money_ar(v: float) -> str:
-    # 1234.5 -> 1.234,50
-    s = f"{float(v):,.2f}"
-    return s.replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def _truncate(s: str, n: int = 70) -> str:
-    s = (s or "").strip()
-    if len(s) <= n:
-        return s
-    return s[: max(0, n - 1)].rstrip() + "…"
-
-
-def _wrap_text(c: canvas.Canvas, text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
-    """
-    Wrap simple basado en width de reportlab.
-    """
-    from reportlab.pdfbase.pdfmetrics import stringWidth
-
-    words = (text or "").split()
-    if not words:
-        return [""]
-
-    lines: List[str] = []
-    cur = ""
-    for w in words:
-        candidate = (cur + " " + w).strip()
-        if stringWidth(candidate, font_name, font_size) <= max_width:
-            cur = candidate
-        else:
-            if cur:
-                lines.append(cur)
-                cur = w
-            else:
-                # palabra muy larga -> cortar
-                lines.append(w)
-                cur = ""
-    if cur:
-        lines.append(cur)
-    return lines
-
-
 # ============================================================
-# USAGE COUNTER (SQLite)
+# USAGE COUNTER (SQLite en disk de Render)
 # ============================================================
 SQLITE_PATH = (os.getenv("SQLITE_PATH", "") or "").strip()
 if not SQLITE_PATH:
-    SQLITE_PATH = "/var/data/usage.db" if os.path.isdir("/var/data") else "/tmp/usage.db"
+    if os.path.isdir("/var/data"):
+        SQLITE_PATH = "/var/data/usage.db"
+    else:
+        SQLITE_PATH = "/tmp/usage.db"
 
 _DB_LOCK = threading.Lock()
 
@@ -229,6 +196,7 @@ def _sqlite_init():
             );
             """
         )
+
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_total (
@@ -239,7 +207,8 @@ def _sqlite_init():
             );
             """
         )
-        now_iso = _now_iso_utc()
+
+        now_iso = datetime.now(timezone.utc).isoformat()
         con.execute(
             """
             INSERT INTO usage_total (id, files_count, requests_count, updated_at)
@@ -249,7 +218,7 @@ def _sqlite_init():
             (now_iso,),
         )
 
-        # tenants WSFE
+        # tenants WSFE (por cliente)
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS tenants (
@@ -262,7 +231,7 @@ def _sqlite_init():
             """
         )
 
-        # users (perfil + password)
+        # users (perfil + password hash opcional)
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -278,12 +247,27 @@ def _sqlite_init():
             """
         )
 
+        # ✅ opcional: datos emisor (para PDF más clásico)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenant_profile (
+                cuit TEXT PRIMARY KEY,
+                razon_social TEXT DEFAULT '',
+                domicilio TEXT DEFAULT '',
+                cond_iva TEXT DEFAULT '',
+                iibb TEXT DEFAULT '',
+                inicio_actividades TEXT DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
         con.commit()
 
 
 def _sqlite_upsert(year_month: str, files_delta: int, requests_delta: int):
     _ensure_sqlite_dir()
-    now_iso = _now_iso_utc()
+    now_iso = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -315,7 +299,7 @@ def _sqlite_get(year_month: str) -> Dict[str, Any]:
 def _sqlite_total_add(files_delta: int, requests_delta: int):
     _ensure_sqlite_dir()
     _sqlite_init()
-    now_iso = _now_iso_utc()
+    now_iso = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
             """
@@ -438,15 +422,8 @@ def _user_update(cuit: str, full_name: str, email: str, phone: str, company: str
             ((full_name or "").strip(), (email or "").strip(), (phone or "").strip(), (company or "").strip(), now, c),
         )
         con.commit()
-    return _user_get(c) or {
-        "cuit": c,
-        "full_name": "",
-        "email": "",
-        "phone": "",
-        "company": "",
-        "created_at": now,
-        "updated_at": now,
-    }
+    u = _user_get(c)
+    return u or {"cuit": c, "full_name": "", "email": "", "phone": "", "company": "", "created_at": now, "updated_at": now}
 
 
 def _user_set_password_hash(cuit: str, password_hash: str):
@@ -480,7 +457,7 @@ class ChangePasswordRequest(BaseModel):
 
 def _current_user_cuit_from_env() -> str:
     c = _norm_cuit(MAXI_CUIT)
-    return c if c else "00000000000"
+    return c or "00000000000"
 
 
 @app.get("/me")
@@ -527,7 +504,11 @@ def me_update_endpoint(payload: MeUpdateRequest, x_api_key: str = Header(default
 
 
 @app.post("/me/change-password")
-def me_change_password_endpoint(payload: ChangePasswordRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+def me_change_password_endpoint(
+    payload: ChangePasswordRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -587,17 +568,16 @@ def login(payload: LoginRequest, x_api_key: str = Header(default="")):
 
 
 # ============================================================
-# PLAN LIMIT (bolsa TOTAL de /verify)
+# PLAN LIMIT (solo /verify)
 # ============================================================
-PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100") or "100")
+PLAN_LIMIT = int(os.getenv("PLAN_LIMIT", "100"))
 
 
 def check_plan_limit_or_raise(files_to_add: int):
     usage = usage_total_current()
-    used = int(usage.get("files_count", 0) or 0)
+    used = int(usage.get("files_count", 0))
     limit = int(PLAN_LIMIT)
 
-    # ❗Bloquea si el total (used + nuevos) supera limit
     if used + int(files_to_add) > limit:
         raise HTTPException(
             status_code=403,
@@ -659,7 +639,6 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
     updated_at = usage.get("updated_at") or "-"
 
     subject = f"Resumen de uso - {ym} (LexaCAE)"
-
     text = (
         f"Resumen de uso - {ym}\n"
         f"Estimado cliente,\n\n"
@@ -668,7 +647,6 @@ def send_usage_report_email(usage: Dict[str, Any]) -> Dict[str, Any]:
         f"Actualizado: {updated_at}\n\n"
         f"Gracias por usar nuestro servicio.\n"
     )
-
     html = (
         "<div style='font-family: Arial, sans-serif; line-height: 1.5;'>"
         f"<h2>Resumen de uso - {ym}</h2>"
@@ -776,7 +754,6 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
                 raw = c.data.decode("utf-8", "ignore").strip()
                 if raw.startswith("http") and "p=" in raw:
                     from urllib.parse import urlparse, parse_qs
-                    import json
 
                     parsed = urlparse(raw)
                     qs = parse_qs(parsed.query)
@@ -787,6 +764,8 @@ def _try_extract_afip_qr(pdf_bytes: bytes, max_pages: int = 2) -> Dict[str, Any]
                     pad = "=" * (-len(p) % 4)
                     payload_b64 = p + pad
                     payload_json = base64.urlsafe_b64decode(payload_b64).decode("utf-8", "ignore")
+                    import json
+
                     data = json.loads(payload_json)
                     if isinstance(data, dict) and data:
                         return data
@@ -1050,6 +1029,7 @@ WSCDC_SOAP_ACTION = os.getenv(
 ).strip()
 WSCDC_NS = os.getenv("WSCDC_NS", "http://servicios1.afip.gob.ar/wscdc/").strip()
 
+
 # ============================================================
 # AFIP CONFIG (WSFEv1)
 # ============================================================
@@ -1247,7 +1227,12 @@ def _wsaa_login_get_ta(service: str, env_cert_b64: str, env_key_b64: str, cache_
 
 
 def wsaa_login_get_ta(service: str = "wscdc") -> Dict[str, str]:
-    return _wsaa_login_get_ta(service=service, env_cert_b64=AFIP_CERT_B64, env_key_b64=AFIP_KEY_B64, cache_key=f"global:{AFIP_ENV}:{service}")
+    return _wsaa_login_get_ta(
+        service=service,
+        env_cert_b64=AFIP_CERT_B64,
+        env_key_b64=AFIP_KEY_B64,
+        cache_key=f"global:{AFIP_ENV}:{service}",
+    )
 
 
 def wsaa_login_get_ta_for(service: str, tenant_cuit: str, cert_b64: str, key_b64: str) -> Dict[str, str]:
@@ -1321,7 +1306,7 @@ def wscdc_comprobante_constatar(
 
 
 # ============================================================
-# VERIFY ENDPOINT
+# VERIFY ENDPOINT (WSCDC) — con PLAN_LIMIT
 # ============================================================
 @app.post("/verify")
 async def verify(
@@ -1333,11 +1318,13 @@ async def verify(
     check_bearer(authorization)
     require_afip_env_wscdc()
 
-    # ✅ acá es donde funciona PLAN_LIMIT (bolsa total)
     check_plan_limit_or_raise(files_to_add=len(files))
 
     try:
         usage_total_increment(files_delta=len(files), requests_delta=1)
+    except Exception:
+        pass
+    try:
         usage_increment(files_delta=len(files), requests_delta=1)
     except Exception:
         pass
@@ -1654,12 +1641,18 @@ def tenant_get(cuit: str) -> Optional[Dict[str, Any]]:
         row = cur.fetchone()
     if not row:
         return None
-    return {"cuit": row[0], "cert_b64": row[1], "key_b64": row[2], "enabled": bool(int(row[3])), "updated_at": row[4]}
+    return {
+        "cuit": row[0],
+        "cert_b64": row[1],
+        "key_b64": row[2],
+        "enabled": bool(int(row[3])),
+        "updated_at": row[4],
+    }
 
 
 def tenant_upsert(cuit: str, cert_b64: str, key_b64: str, enabled: bool):
     _sqlite_init()
-    now_iso = _now_iso_utc()
+    now_iso = datetime.now(timezone.utc).isoformat()
     c = _norm_cuit(cuit)
     with sqlite3.connect(SQLITE_PATH) as con:
         con.execute(
@@ -1678,7 +1671,11 @@ def tenant_upsert(cuit: str, cert_b64: str, key_b64: str, enabled: bool):
 
 
 @app.post("/tenants/upsert")
-def tenants_upsert_endpoint(payload: TenantUpsertRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+def tenants_upsert_endpoint(
+    payload: TenantUpsertRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -1955,286 +1952,339 @@ def wsfe_cae_endpoint(payload: WsfeCaeRequest, x_api_key: str = Header(default="
 
 
 # ============================================================
-# PDF REAL (con ítems) — /wsfe/pdf
+# PDF CLÁSICO (A/B/C) + ITEMS + QR AFIP
 # ============================================================
-class InvoiceItem(BaseModel):
-    descripcion: str = Field(..., min_length=1)
-    cantidad: float = Field(..., gt=0)
-    precio_unitario: float = Field(..., ge=0)
-    # si no lo mandan, lo calculamos
-    subtotal: Optional[float] = None
+class PdfItem(BaseModel):
+    description: str = ""
+    qty: float = 0.0
+    unit_price: float = 0.0
+    subtotal: float = 0.0
 
 
 class WsfePdfRequest(BaseModel):
-    # ✅ lo que tu FRONT ya manda
     cuit: str
     pto_vta: int
     cbte_tipo: int
     cbte_nro: int
-    cbte_fch: str
+    cbte_fch: str  # YYYYMMDD
     doc_tipo: int
     doc_nro: str
+
     imp_total: float
     cae: str
     cae_vto: str
 
-    # ✅ extras “real real” (opcionales)
-    resultado: Optional[str] = None
-    moneda: Optional[str] = "PES"
+    # extras (tu front los manda dentro de pdf_payload)
+    resultado: Optional[str] = ""
+    imp_tot_conc: float = 0.0
+    imp_neto: float = 0.0
+    imp_op_ex: float = 0.0
+    imp_trib: float = 0.0
+    imp_iva: float = 0.0
 
-    emisor_razon_social: Optional[str] = "—"
-    emisor_domicilio: Optional[str] = "—"
-    emisor_iibb: Optional[str] = "—"
-    emisor_inicio_act: Optional[str] = "—"
+    mon_id: str = "PES"
+    mon_ctz: float = 1.0
 
-    receptor_razon_social: Optional[str] = "Cliente"
-    receptor_domicilio: Optional[str] = "—"
+    razon_social: str = "Cliente"
+    domicilio: str = "—"
 
-    # Totales desglosados (si los tenés)
-    imp_neto: Optional[float] = 0.0
-    imp_iva: Optional[float] = 0.0
-    imp_trib: Optional[float] = 0.0
-    imp_op_ex: Optional[float] = 0.0
-    imp_tot_conc: Optional[float] = 0.0
-
-    # Ítems
-    items: List[InvoiceItem] = Field(default_factory=list)
-
-    # Observaciones libres / condiciones
-    observaciones: Optional[str] = ""
+    items: List[PdfItem] = Field(default_factory=list)
 
 
-def _validate_items_vs_total(data: WsfePdfRequest):
-    if not data.items:
-        return
-
-    computed = 0.0
-    for it in data.items:
-        qty = _safe_float(it.cantidad, 0.0)
-        pu = _safe_float(it.precio_unitario, 0.0)
-        st = _safe_float(it.subtotal, qty * pu)
-        # normalizamos: si subtotal venía vacío, lo calculamos
-        it.subtotal = st
-        computed += st
-
-    # tolerancia por redondeo
-    if round(computed, 2) != round(float(data.imp_total), 2):
-        raise HTTPException(
-            status_code=400,
-            detail=f"La suma de ítems ({_money_ar(computed)}) no coincide con imp_total ({_money_ar(float(data.imp_total))}).",
-        )
+def _fmt_money_ar(x: float) -> str:
+    s = f"{float(x):,.2f}"
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def _draw_header(c: canvas.Canvas, x: float, y: float, data: WsfePdfRequest) -> float:
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(x, y, "COMPROBANTE ELECTRÓNICO")
-    y -= 6 * mm
-    c.setFont("Helvetica", 9)
-    c.drawString(x, y, "Documento generado automáticamente por LexaCAE")
-    y -= 10 * mm
-
-    # Bloque emisor / comprobante
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x, y, "EMISOR")
-    c.setFont("Helvetica", 9)
-    y -= 5 * mm
-    c.drawString(x, y, f"CUIT: {_norm_cuit(data.cuit)}")
-    y -= 4 * mm
-    c.drawString(x, y, f"Razón Social: {str(data.emisor_razon_social or '—').strip()}")
-    y -= 4 * mm
-    c.drawString(x, y, f"Domicilio: {str(data.emisor_domicilio or '—').strip()}")
-    y -= 4 * mm
-    c.drawString(x, y, f"IIBB: {str(data.emisor_iibb or '—').strip()}   Inicio Act.: {str(data.emisor_inicio_act or '—').strip()}")
-
-    # Bloque comprobante (derecha)
-    right_x = 120 * mm
-    top_y = y + 13 * mm
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(right_x, top_y, "COMPROBANTE")
-    c.setFont("Helvetica", 9)
-    c.drawString(right_x, top_y - 5 * mm, f"PtoVta: {int(data.pto_vta)}")
-    c.drawString(right_x, top_y - 9 * mm, f"Tipo: {int(data.cbte_tipo)}")
-    c.drawString(right_x, top_y - 13 * mm, f"Nro: {int(data.cbte_nro)}")
-    c.drawString(right_x, top_y - 17 * mm, f"Fecha: {str(data.cbte_fch).strip()}")
-
-    y -= 10 * mm
-    c.line(x, y, 195 * mm, y)
-    y -= 8 * mm
-
-    # Receptor
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x, y, "RECEPTOR")
-    c.setFont("Helvetica", 9)
-    y -= 5 * mm
-    c.drawString(x, y, f"DocTipo: {int(data.doc_tipo)}   DocNro: {_norm_cuit(data.doc_nro)}")
-    y -= 4 * mm
-    c.drawString(x, y, f"Razón Social: {str(data.receptor_razon_social or 'Cliente').strip()}")
-    y -= 4 * mm
-    c.drawString(x, y, f"Domicilio: {str(data.receptor_domicilio or '—').strip()}")
-
-    y -= 8 * mm
-    c.line(x, y, 195 * mm, y)
-    y -= 10 * mm
-    return y
+def _fmt_pto_vta(pto: int) -> str:
+    return f"{int(pto):05d}"
 
 
-def _draw_items_table(c: canvas.Canvas, x: float, y: float, data: WsfePdfRequest) -> float:
-    if not data.items:
-        return y
-
-    # columnas
-    col_desc = x
-    col_qty = 132 * mm
-    col_pu = 155 * mm
-    col_sub = 178 * mm
-
-    # header tabla
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(col_desc, y, "Descripción")
-    c.drawString(col_qty, y, "Cant.")
-    c.drawString(col_pu, y, "P. Unit.")
-    c.drawString(col_sub, y, "Subtotal")
-    y -= 3 * mm
-    c.line(x, y, 195 * mm, y)
-    y -= 6 * mm
-
-    c.setFont("Helvetica", 9)
-
-    # filas
-    max_desc_width = (col_qty - 4 * mm) - col_desc
-    for it in data.items:
-        if y < 35 * mm:
-            c.showPage()
-            y = A4[1] - 18 * mm
-            y = _draw_header(c, x, y, data)
-            # reimprimir header tabla
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(col_desc, y, "Descripción")
-            c.drawString(col_qty, y, "Cant.")
-            c.drawString(col_pu, y, "P. Unit.")
-            c.drawString(col_sub, y, "Subtotal")
-            y -= 3 * mm
-            c.line(x, y, 195 * mm, y)
-            y -= 6 * mm
-            c.setFont("Helvetica", 9)
-
-        desc = _truncate(it.descripcion, 220)
-        lines = _wrap_text(c, desc, max_desc_width, "Helvetica", 9)
-        qty = _safe_float(it.cantidad, 0.0)
-        pu = _safe_float(it.precio_unitario, 0.0)
-        st = _safe_float(it.subtotal, qty * pu)
-
-        # primera línea con números
-        c.drawString(col_desc, y, lines[0])
-        c.drawRightString(col_qty + 15 * mm, y, f"{qty:g}")
-        c.drawRightString(col_pu + 15 * mm, y, _money_ar(pu))
-        c.drawRightString(col_sub + 15 * mm, y, _money_ar(st))
-        y -= 5 * mm
-
-        # líneas extra (solo descripción)
-        for extra in lines[1:]:
-            if y < 35 * mm:
-                c.showPage()
-                y = A4[1] - 18 * mm
-                y = _draw_header(c, x, y, data)
-                c.setFont("Helvetica", 9)
-            c.drawString(col_desc, y, extra)
-            y -= 5 * mm
-
-        y -= 2 * mm
-
-    y -= 2 * mm
-    c.line(x, y, 195 * mm, y)
-    y -= 8 * mm
-    return y
+def _fmt_cbte_nro(nro: int) -> str:
+    return f"{int(nro):08d}"
 
 
-def _draw_totals_and_afip(c: canvas.Canvas, x: float, y: float, data: WsfePdfRequest) -> float:
-    right = 195 * mm
-
-    # Totales (derecha)
-    def row(label: str, value: str):
-        nonlocal y
-        c.setFont("Helvetica", 9)
-        c.drawRightString(right - 45 * mm, y, label)
-        c.setFont("Helvetica-Bold", 9)
-        c.drawRightString(right, y, value)
-        y -= 5 * mm
-
-    c.setFont("Helvetica-Bold", 10)
-    c.drawRightString(right, y, "TOTALES")
-    y -= 7 * mm
-
-    # si vienen desglosados, los mostramos
-    imp_neto = _safe_float(data.imp_neto, 0.0)
-    imp_iva = _safe_float(data.imp_iva, 0.0)
-    imp_trib = _safe_float(data.imp_trib, 0.0)
-    imp_op_ex = _safe_float(data.imp_op_ex, 0.0)
-    imp_tot_conc = _safe_float(data.imp_tot_conc, 0.0)
-
-    any_breakdown = any(abs(v) > 0.0001 for v in [imp_neto, imp_iva, imp_trib, imp_op_ex, imp_tot_conc])
-    if any_breakdown:
-        if imp_neto:
-            row("Neto:", "$ " + _money_ar(imp_neto))
-        if imp_iva:
-            row("IVA:", "$ " + _money_ar(imp_iva))
-        if imp_trib:
-            row("Tributos:", "$ " + _money_ar(imp_trib))
-        if imp_op_ex:
-            row("Op. Exentas:", "$ " + _money_ar(imp_op_ex))
-        if imp_tot_conc:
-            row("No Gravado:", "$ " + _money_ar(imp_tot_conc))
-
-    row("TOTAL:", "$ " + _money_ar(float(data.imp_total)))
-
-    y -= 4 * mm
-    c.line(x, y, 195 * mm, y)
-    y -= 10 * mm
-
-    # AFIP
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x, y, "AUTORIZACIÓN AFIP")
-    y -= 6 * mm
-
-    c.setFont("Helvetica", 9)
-    c.drawString(x, y, f"CAE: {str(data.cae).strip()}")
-    y -= 5 * mm
-    c.drawString(x, y, f"Vto CAE: {str(data.cae_vto).strip()}")
-    y -= 5 * mm
-
-    if (data.resultado or "").strip():
-        c.drawString(x, y, f"Resultado: {str(data.resultado).strip()}")
-        y -= 5 * mm
-
-    if (data.observaciones or "").strip():
-        y -= 2 * mm
-        c.setFont("Helvetica-Bold", 9)
-        c.drawString(x, y, "Observaciones:")
-        y -= 5 * mm
-        c.setFont("Helvetica", 9)
-        lines = _wrap_text(c, str(data.observaciones), 175 * mm, "Helvetica", 9)
-        for ln in lines[:8]:
-            c.drawString(x, y, ln)
-            y -= 5 * mm
-
-    y -= 6 * mm
-    c.setFont("Helvetica-Oblique", 7)
-    c.drawString(x, y, "Este documento es una representación gráfica generada por LexaCAE (no sustituye la normativa AFIP).")
-
-    return y
+def _cbte_letter(cbte_tipo: int) -> str:
+    # comunes: 1=A, 6=B, 11=C, 51=M
+    m = {1: "A", 6: "B", 11: "C", 51: "M"}
+    return m.get(int(cbte_tipo), "")
 
 
-def _build_real_invoice_pdf(data: WsfePdfRequest) -> bytes:
-    _validate_items_vs_total(data)
+def _cbte_name(cbte_tipo: int) -> str:
+    # básico
+    t = int(cbte_tipo)
+    if t in (1, 6, 11, 51):
+        return "FACTURA"
+    if t in (3, 8, 13):
+        return "NOTA DE CRÉDITO"
+    if t in (2, 7, 12):
+        return "NOTA DE DÉBITO"
+    return "COMPROBANTE"
 
+
+def _yyyyMMdd_to_ddmmyyyy(s: str) -> str:
+    try:
+        s = (s or "").strip()
+        if len(s) == 8:
+            return f"{s[6:8]}/{s[4:6]}/{s[0:4]}"
+    except Exception:
+        pass
+    return s or ""
+
+
+def _build_afip_qr_url(data: WsfePdfRequest) -> Optional[str]:
+    """
+    Genera URL QR AFIP (estructura estándar).
+    No es “fiscalmente vinculante” pero es el formato esperado para QR de comprobantes.
+    """
+    try:
+        import json
+        from urllib.parse import quote
+
+        fecha = _yyyyMMdd_to_ddmmyyyy(str(data.cbte_fch))
+        fecha = fecha.replace("/", "-")  # AFIP suele usar YYYY-MM-DD, pero aceptan variantes. Usamos YYYY-MM-DD.
+        # si vino DD-MM-YYYY lo pasamos:
+        if len(fecha) == 10 and fecha[2] == "-" and fecha[5] == "-":
+            # DD-MM-YYYY -> YYYY-MM-DD
+            fecha = f"{fecha[6:10]}-{fecha[3:5]}-{fecha[0:2]}"
+        elif len(str(data.cbte_fch).strip()) == 8:
+            s = str(data.cbte_fch).strip()
+            fecha = f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+
+        payload = {
+            "ver": 1,
+            "fecha": fecha,
+            "cuit": int(_norm_cuit(data.cuit)),
+            "ptoVta": int(data.pto_vta),
+            "tipoCmp": int(data.cbte_tipo),
+            "nroCmp": int(data.cbte_nro),
+            "importe": float(data.imp_total),
+            "moneda": str(data.mon_id or "PES").strip().upper(),
+            "ctz": float(data.mon_ctz or 1.0),
+            "tipoDocRec": int(data.doc_tipo),
+            "nroDocRec": int(re.sub(r"\D+", "", str(data.doc_nro)) or "0"),
+            "tipoCodAut": "E",
+            "codAut": int(re.sub(r"\D+", "", str(data.cae)) or "0"),
+        }
+
+        j = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        p = base64.urlsafe_b64encode(j).decode("utf-8").rstrip("=")
+        return f"https://www.afip.gob.ar/fe/qr/?p={quote(p)}"
+    except Exception:
+        return None
+
+
+def _draw_qr(c: canvas.Canvas, url: str, x: float, y: float, size_mm: float = 28.0):
+    """
+    Dibuja QR (ReportLab) con URL.
+    x,y son esquina inferior izquierda.
+    """
+    qr_code = rl_qr.QrCodeWidget(url)
+    bounds = qr_code.getBounds()
+    w = bounds[2] - bounds[0]
+    h = bounds[3] - bounds[1]
+    size = size_mm * mm
+    d = Drawing(size, size, transform=[size / w, 0, 0, size / h, 0, 0])
+    d.add(qr_code)
+    renderPDF.draw(d, c, x, y)
+
+
+def _build_invoice_pdf_clasico(data: WsfePdfRequest) -> bytes:
+    """
+    PDF estilo clásico:
+    - Encabezado con FACTURA + letra
+    - Datos emisor/receptor
+    - Numeración 00001-00000001
+    - Tabla items
+    - Totales + CAE + QR AFIP
+    """
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
-    x = 15 * mm
-    y = A4[1] - 18 * mm
+    w, h = A4
 
-    y = _draw_header(c, x, y, data)
-    y = _draw_items_table(c, x, y, data)
-    _draw_totals_and_afip(c, x, y, data)
+    margin = 14 * mm
+    x0 = margin
+    y = h - margin
+
+    # ---- Encabezado (caja superior)
+    letter = _cbte_letter(data.cbte_tipo)
+    cbte_name = _cbte_name(data.cbte_tipo)
+    nro_fmt = f"{_fmt_pto_vta(data.pto_vta)}-{_fmt_cbte_nro(data.cbte_nro)}"
+
+    head_h = 42 * mm
+    c.setLineWidth(0.8)
+    c.rect(x0, y - head_h, w - 2 * margin, head_h, stroke=1, fill=0)
+
+    # Columna izquierda (emisor)
+    left_w = (w - 2 * margin) * 0.62
+    c.line(x0 + left_w, y, x0 + left_w, y - head_h)
+
+    # Letra grande al centro-derecha
+    box_letter = 18 * mm
+    c.rect(x0 + left_w + 6 * mm, y - 12 * mm - box_letter + 2 * mm, box_letter, box_letter, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawCentredString(x0 + left_w + 6 * mm + box_letter / 2, y - 12 * mm - box_letter / 2 + 3 * mm, letter or " ")
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(x0 + left_w + 6 * mm + box_letter + 6 * mm, y - 14 * mm, cbte_name)
+
+    c.setFont("Helvetica", 9)
+    c.drawString(x0 + left_w + 6 * mm + box_letter + 6 * mm, y - 20 * mm, f"Nro: {nro_fmt}")
+    c.drawString(x0 + left_w + 6 * mm + box_letter + 6 * mm, y - 26 * mm, f"Fecha: {_yyyyMMdd_to_ddmmyyyy(str(data.cbte_fch))}")
+
+    # Emisor (por ahora base: CUIT + (si cargás más datos en tu front, lo agregás acá))
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x0 + 5 * mm, y - 10 * mm, "EMISOR")
+    c.setFont("Helvetica", 9)
+    c.drawString(x0 + 5 * mm, y - 16 * mm, f"CUIT: {_norm_cuit(data.cuit)}")
+    # si querés, podés setear por ENV para “clásico”
+    EMISOR_RAZON = (os.getenv("EMISOR_RAZON", "") or "").strip()
+    EMISOR_DOM = (os.getenv("EMISOR_DOMICILIO", "") or "").strip()
+    EMISOR_COND = (os.getenv("EMISOR_COND_IVA", "") or "").strip()
+    if EMISOR_RAZON:
+        c.drawString(x0 + 5 * mm, y - 22 * mm, f"Razón Social: {EMISOR_RAZON}")
+    if EMISOR_DOM:
+        c.drawString(x0 + 5 * mm, y - 28 * mm, f"Domicilio: {EMISOR_DOM}")
+    if EMISOR_COND:
+        c.drawString(x0 + 5 * mm, y - 34 * mm, f"Cond. IVA: {EMISOR_COND}")
+
+    y -= head_h + 6 * mm
+
+    # ---- Receptor
+    rec_h = 24 * mm
+    c.setLineWidth(0.6)
+    c.rect(x0, y - rec_h, w - 2 * margin, rec_h, stroke=1, fill=0)
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x0 + 5 * mm, y - 7 * mm, "RECEPTOR")
+    c.setFont("Helvetica", 9)
+    c.drawString(x0 + 5 * mm, y - 13 * mm, f"Razón Social: {str(data.razon_social).strip()}")
+    c.drawString(
+        x0 + 5 * mm,
+        y - 18 * mm,
+        f"Doc: {int(data.doc_tipo)} - {re.sub(r'\\D+', '', str(data.doc_nro))}   Domicilio: {str(data.domicilio).strip()}",
+    )
+
+    y -= rec_h + 6 * mm
+
+    # ---- Items (tabla)
+    items = data.items or []
+    if not items:
+        # fallback: una línea genérica
+        items = [PdfItem(description="Concepto / servicio", qty=1.0, unit_price=float(data.imp_total), subtotal=float(data.imp_total))]
+
+    table_top = y
+    table_w = w - 2 * margin
+    col_desc = table_w * 0.58
+    col_qty = table_w * 0.10
+    col_unit = table_w * 0.16
+    col_sub = table_w - (col_desc + col_qty + col_unit)
+
+    row_h = 7 * mm
+    header_h = 8 * mm
+
+    # cabecera tabla
+    c.setLineWidth(0.6)
+    c.rect(x0, table_top - header_h, table_w, header_h, stroke=1, fill=0)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x0 + 2 * mm, table_top - 5.5 * mm, "Descripción")
+    c.drawRightString(x0 + col_desc + col_qty - 2 * mm, table_top - 5.5 * mm, "Cant.")
+    c.drawRightString(x0 + col_desc + col_qty + col_unit - 2 * mm, table_top - 5.5 * mm, "P. Unit.")
+    c.drawRightString(x0 + table_w - 2 * mm, table_top - 5.5 * mm, "Subtotal")
+
+    y = table_top - header_h
+
+    c.setFont("Helvetica", 9)
+    for it in items:
+        # salto de página si no entra
+        if y - row_h < (margin + 55 * mm):
+            c.showPage()
+            y = h - margin
+            table_top = y
+            c.setLineWidth(0.6)
+            c.rect(x0, table_top - header_h, table_w, header_h, stroke=1, fill=0)
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(x0 + 2 * mm, table_top - 5.5 * mm, "Descripción")
+            c.drawRightString(x0 + col_desc + col_qty - 2 * mm, table_top - 5.5 * mm, "Cant.")
+            c.drawRightString(x0 + col_desc + col_qty + col_unit - 2 * mm, table_top - 5.5 * mm, "P. Unit.")
+            c.drawRightString(x0 + table_w - 2 * mm, table_top - 5.5 * mm, "Subtotal")
+            y = table_top - header_h
+            c.setFont("Helvetica", 9)
+
+        desc = (it.description or "").strip()
+        qty = _safe_float(it.qty, 0.0)
+        unit = _safe_float(it.unit_price, 0.0)
+        sub = _safe_float(it.subtotal, qty * unit)
+
+        c.setLineWidth(0.4)
+        c.rect(x0, y - row_h, table_w, row_h, stroke=1, fill=0)
+
+        # texto (recorta)
+        if len(desc) > 85:
+            desc = desc[:85] + "…"
+
+        c.drawString(x0 + 2 * mm, y - 5 * mm, desc)
+        c.drawRightString(x0 + col_desc + col_qty - 2 * mm, y - 5 * mm, _fmt_money_ar(qty))
+        c.drawRightString(x0 + col_desc + col_qty + col_unit - 2 * mm, y - 5 * mm, _fmt_money_ar(unit))
+        c.drawRightString(x0 + table_w - 2 * mm, y - 5 * mm, _fmt_money_ar(sub))
+
+        y -= row_h
+
+    y -= 6 * mm
+
+    # ---- Totales + CAE + QR
+    # caja totales
+    box_h = 36 * mm
+    c.setLineWidth(0.6)
+    c.rect(x0, y - box_h, table_w, box_h, stroke=1, fill=0)
+
+    # totales a derecha
+    bx = x0 + table_w - 78 * mm
+    yy = y - 8 * mm
+
+    c.setFont("Helvetica", 9)
+    c.drawString(bx, yy, "Neto gravado:")
+    c.drawRightString(x0 + table_w - 5 * mm, yy, f"$ {_fmt_money_ar(data.imp_neto)}"); yy -= 5 * mm
+    c.drawString(bx, yy, "IVA:")
+    c.drawRightString(x0 + table_w - 5 * mm, yy, f"$ {_fmt_money_ar(data.imp_iva)}"); yy -= 5 * mm
+    c.drawString(bx, yy, "Tributos:")
+    c.drawRightString(x0 + table_w - 5 * mm, yy, f"$ {_fmt_money_ar(data.imp_trib)}"); yy -= 5 * mm
+    c.drawString(bx, yy, "Op. Exentas:")
+    c.drawRightString(x0 + table_w - 5 * mm, yy, f"$ {_fmt_money_ar(data.imp_op_ex)}"); yy -= 5 * mm
+    c.drawString(bx, yy, "No gravado:")
+    c.drawRightString(x0 + table_w - 5 * mm, yy, f"$ {_fmt_money_ar(data.imp_tot_conc)}"); yy -= 7 * mm
+
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(bx, yy, "TOTAL:")
+    c.drawRightString(x0 + table_w - 5 * mm, yy, f"$ {_fmt_money_ar(data.imp_total)}")
+
+    # CAE izquierda
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x0 + 5 * mm, y - 10 * mm, "CAE:")
+    c.setFont("Helvetica", 10)
+    c.drawString(x0 + 20 * mm, y - 10 * mm, str(data.cae).strip())
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x0 + 5 * mm, y - 16 * mm, "Vto CAE:")
+    c.setFont("Helvetica", 10)
+    c.drawString(x0 + 20 * mm, y - 16 * mm, str(data.cae_vto).strip())
+
+    # QR AFIP (abajo-izq)
+    qr_url = _build_afip_qr_url(data)
+    if qr_url:
+        try:
+            _draw_qr(c, qr_url, x0 + 5 * mm, y - box_h + 4 * mm, size_mm=28.0)
+            c.setFont("Helvetica", 7)
+            c.setFillGray(0.35)
+            c.drawString(x0 + 36 * mm, y - box_h + 10 * mm, "QR AFIP")
+            c.setFillGray(0)
+        except Exception:
+            pass
+
+    c.setFont("Helvetica-Oblique", 7)
+    c.setFillGray(0.35)
+    c.drawString(x0 + 5 * mm, margin - 4 * mm, "Documento generado automáticamente por LexaCAE (WSFEv1).")
+    c.setFillGray(0)
 
     c.showPage()
     c.save()
@@ -2242,19 +2292,17 @@ def _build_real_invoice_pdf(data: WsfePdfRequest) -> bytes:
 
 
 @app.post("/wsfe/pdf")
-def wsfe_pdf_endpoint(payload: WsfePdfRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+def wsfe_pdf_endpoint(
+    payload: WsfePdfRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
-    try:
-        pdf_bytes = _build_real_invoice_pdf(payload)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("PDF build error: %s\n%s", str(e), traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"No se pudo generar PDF: {e}")
-
+    pdf_bytes = _build_invoice_pdf_clasico(payload)
     filename = f"factura_{_norm_cuit(payload.cuit)}_{payload.pto_vta}_{payload.cbte_tipo}_{payload.cbte_nro}.pdf"
+
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -2263,11 +2311,13 @@ def wsfe_pdf_endpoint(payload: WsfePdfRequest, x_api_key: str = Header(default="
 
 
 # ============================================================
-# WSFE EMAIL (adjunta el PDF REAL) — /wsfe/email
+# WSFE EMAIL (enviar comprobante PDF al cliente)
+#   - Contrato del FRONT:
+#       { "to_email": "...", "pdf_payload": { ... } }
 # ============================================================
 class WsfeEmailRequest(BaseModel):
     to_email: str
-    pdf_payload: Dict[str, Any]  # el front manda dict
+    pdf_payload: Dict[str, Any]
 
 
 def _send_email_with_pdf_smtp(to_email: str, subject: str, text: str, html: str, pdf_bytes: bytes, filename: str):
@@ -2350,11 +2400,16 @@ def _send_email_with_pdf_resend(to_email: str, subject: str, text: str, html: st
         "html": html,
         "attachments": [{"filename": filename, "content": att_b64}],
     }
-    return resend.Emails.send(params)
+    resp = resend.Emails.send(params)
+    return resp
 
 
 @app.post("/wsfe/email")
-def wsfe_email_endpoint(payload: WsfeEmailRequest, x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+def wsfe_email_endpoint(
+    payload: WsfeEmailRequest,
+    x_api_key: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
     check_api_key(x_api_key)
     check_bearer(authorization)
 
@@ -2362,13 +2417,10 @@ def wsfe_email_endpoint(payload: WsfeEmailRequest, x_api_key: str = Header(defau
     if not to_email or "@" not in to_email:
         raise HTTPException(status_code=400, detail="to_email inválido.")
 
-    # armamos el PDF REAL con el mismo payload que usa /wsfe/pdf
     try:
         pdf_req = WsfePdfRequest(**(payload.pdf_payload or {}))
-        pdf_bytes = _build_real_invoice_pdf(pdf_req)
+        pdf_bytes = _build_invoice_pdf_clasico(pdf_req)
         filename = f"factura_{_norm_cuit(pdf_req.cuit)}_{pdf_req.pto_vta}_{pdf_req.cbte_tipo}_{pdf_req.cbte_nro}.pdf"
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"pdf_payload inválido o incompleto: {e}")
 
@@ -2404,7 +2456,5 @@ def wsfe_email_endpoint(payload: WsfeEmailRequest, x_api_key: str = Header(defau
             return {"ok": True, "provider": "resend", "to": to_email, "filename": filename, "resend": resp}
 
         raise RuntimeError(f"EMAIL_PROVIDER no soportado para adjuntos: {provider}")
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
