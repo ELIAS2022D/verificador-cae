@@ -1,3 +1,4 @@
+# app.py
 import os
 import io
 import zipfile
@@ -672,6 +673,76 @@ def _wa_renew_url() -> str:
     txt = urllib.parse.quote(RENEW_TEXT or "")
     return f"https://wa.me/{phone}?text={txt}"
 
+# ===================== UI: TABLAS CON CHIPS (BADGES) + MEJOR LECTURA =====================
+def _chip_style(value: str) -> str:
+    """
+    Devuelve CSS para simular chips (badges) con Styler.
+    Ajustá keywords según tus outputs reales.
+    """
+    v = (str(value or "")).lower()
+
+    if "vigente" in v or "ok" in v or "autoriz" in v or "aprob" in v or "acept" in v:
+        return (
+            "background-color: rgba(34,197,94,.18); "
+            "border: 1px solid rgba(34,197,94,.35); "
+            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
+        )
+    if "vencid" in v or "rechaz" in v or "error" in v or "inval" in v:
+        return (
+            "background-color: rgba(239,68,68,.14); "
+            "border: 1px solid rgba(239,68,68,.35); "
+            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
+        )
+    if "observ" in v or "revis" in v or "pend" in v or "formato" in v:
+        return (
+            "background-color: rgba(245,158,11,.16); "
+            "border: 1px solid rgba(245,158,11,.35); "
+            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
+        )
+    if "no encontrado" in v or "no detect" in v or v.strip() == "":
+        return (
+            "background-color: rgba(148,163,184,.18); "
+            "border: 1px solid rgba(148,163,184,.38); "
+            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
+        )
+
+    return (
+        "background-color: rgba(37,99,235,.10); "
+        "border: 1px solid rgba(37,99,235,.25); "
+        "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
+    )
+
+def _render_table_with_chips(df: pd.DataFrame):
+    """
+    Render de dataframe con chips para columnas clave.
+    """
+    if df is None:
+        st.dataframe(df, use_container_width=True)
+        return
+
+    if df.empty:
+        st.dataframe(df, use_container_width=True)
+        return
+
+    chip_cols = [c for c in ["Estado", "AFIP"] if c in df.columns]
+
+    styler = df.style
+    styler = styler.set_properties(**{
+        "font-size": "0.95rem",
+        "vertical-align": "middle",
+    })
+
+    if chip_cols:
+        for col in chip_cols:
+            styler = styler.applymap(_chip_style, subset=[col])
+
+    styler = styler.set_table_styles([
+        {"selector": "thead th", "props": [("font-weight", "750"), ("border-bottom", "1px solid rgba(15,23,42,.12)")]},
+        {"selector": "tbody td", "props": [("border-bottom", "1px solid rgba(15,23,42,.08)")]},
+    ])
+
+    st.dataframe(styler, use_container_width=True, hide_index=True)
+
 # ===================== SIDEBAR: LOGIN + NAV =====================
 with st.sidebar:
     st.subheader("Acceso")
@@ -881,6 +952,13 @@ def render_validacion():
 
         if plan_limit is not None:
             st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
+
+            # ✅ NUEVO: Barra de progreso del plan
+            if plan_limit and plan_limit > 0:
+                ratio = min(1.0, max(0.0, float(plan_used) / float(plan_limit)))
+                st.progress(ratio)
+                st.caption(f"Consumo: **{plan_used}** / **{plan_limit}** ( {int(ratio*100)}% )")
+
             if plan_blocked:
                 st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
                 st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
@@ -1012,7 +1090,7 @@ def render_validacion():
     df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
 
     st.subheader("Vista previa PDF cargados")
-    st.dataframe(df, use_container_width=True)
+    _render_table_with_chips(df)
 
     st.subheader("Validación contra AFIP")
     st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
@@ -1059,7 +1137,7 @@ def render_validacion():
                 status.update(label="Validación completada.", state="complete")
                 toast_ok("AFIP OK — resultados listos.")
                 df = pd.DataFrame(all_rows)
-                st.dataframe(df, use_container_width=True)
+                _render_table_with_chips(df)
             else:
                 if getattr(status, "_state", "") != "error":
                     status.update(label="Sin resultados para mostrar.", state="complete")
@@ -1119,7 +1197,10 @@ def _items_df_normalize(df_items: pd.DataFrame) -> pd.DataFrame:
     df2["Descripción"] = df2["Descripción"].astype(str).fillna("").str.strip()
     df2["Cantidad"] = df2["Cantidad"].apply(lambda v: _safe_float(v, 0.0))
     df2["Precio Unit."] = df2["Precio Unit."].apply(lambda v: _safe_float(v, 0.0))
-    df2["Subtotal"] = df2.apply(lambda r: round(_safe_float(r.get("Cantidad"), 0.0) * _safe_float(r.get("Precio Unit."), 0.0), 2), axis=1)
+    df2["Subtotal"] = df2.apply(
+        lambda r: round(_safe_float(r.get("Cantidad"), 0.0) * _safe_float(r.get("Precio Unit."), 0.0), 2),
+        axis=1
+    )
     df2 = df2[(df2["Descripción"] != "") | (df2["Cantidad"] != 0) | (df2["Precio Unit."] != 0)]
     df2 = df2.reset_index(drop=True)
     return df2
@@ -1193,17 +1274,15 @@ def render_facturacion():
                 sec["cert_loaded"] = False
                 sec["cert_source"] = ""
                 sec["cert_len"] = 0
-                sec["cert_file_sig"] = ""   # <- importante
+                sec["cert_file_sig"] = ""
                 toast_warn("Certificado eliminado.")
                 st.rerun()
 
-    # --- Procesar archivo SOLO si cambió (sin rerun) ---
     file_sig = None
     if cert_file is not None:
         try:
             file_sig = f"{cert_file.name}:{cert_file.size}"
         except Exception:
-            # fallback por si size no existe en alguna versión
             file_sig = f"{cert_file.name}"
 
     if cert_file is not None and sec.get("cert_file_sig") != file_sig:
@@ -1227,7 +1306,6 @@ def render_facturacion():
             f"Vista: `{_mask_b64(sec.get('cert_b64'))}`"
         )
 
-    # Pegar manual (por defecto oculto)
     if sec.get("show_cert"):
         st.text_area(
             "CERT_B64 (visible)",
@@ -1241,7 +1319,6 @@ def render_facturacion():
         sec["cert_loaded"] = bool(newv)
         sec["cert_source"] = ("manual" if newv else sec.get("cert_source", ""))
         sec["cert_len"] = len(newv)
-        # Si se editó manual, invalido firma de archivo
         if newv:
             sec["cert_file_sig"] = sec.get("cert_file_sig") or ""
     else:
@@ -1276,11 +1353,10 @@ def render_facturacion():
                 sec["key_loaded"] = False
                 sec["key_source"] = ""
                 sec["key_len"] = 0
-                sec["key_file_sig"] = ""   # <- importante
+                sec["key_file_sig"] = ""
                 toast_warn("Clave eliminada.")
                 st.rerun()
 
-    # --- Procesar archivo SOLO si cambió (sin rerun) ---
     file_sig = None
     if key_file is not None:
         try:
@@ -1380,7 +1456,13 @@ def render_facturacion():
 
     colr1, colr2 = st.columns(2)
     with colr1:
-        doc_tipo = st.selectbox("DocTipo receptor", options=[80, 96], index=0, format_func=lambda x: {80: "80 - CUIT", 96: "96 - DNI"}[x], key="emit_doct")
+        doc_tipo = st.selectbox(
+            "DocTipo receptor",
+            options=[80, 96],
+            index=0,
+            format_func=lambda x: {80: "80 - CUIT", 96: "96 - DNI"}[x],
+            key="emit_doct"
+        )
     with colr2:
         doc_nro = st.text_input("DocNro receptor (CUIT 11 / DNI 7-8)", key="emit_docn")
 
