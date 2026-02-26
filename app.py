@@ -1015,7 +1015,7 @@ def render_validacion():
         if plan_limit is not None:
             st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
 
-            # ✅ NUEVO: barra de consumo del plan (se va llenando)
+            # ✅ barra de consumo del plan
             if plan_limit and plan_limit > 0:
                 ratio = min(1.0, max(0.0, float(plan_used) / float(plan_limit)))
                 st.progress(ratio)
