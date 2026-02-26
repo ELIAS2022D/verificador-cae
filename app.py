@@ -220,7 +220,7 @@ def render_top_ticker():
     st.markdown(
         f"""
         <style>
-          /* Reservar espacio arriba para que no tape el contenido */
+          /* Reservar espacio arriba para que no tape el contenido (NO cambiamos esto al ocultar para evitar saltos) */
           section.main > div {{ padding-top: 4.25rem !important; }}
 
           .lx-topbar {{
@@ -234,6 +234,17 @@ def render_top_ticker():
             background: {tone_bg};
             border-bottom: 1px solid {tone_border};
             box-shadow: 0 12px 28px rgba(15,23,42,.10);
+            transform: translateY(0);
+            opacity: 1;
+            transition: transform .22s ease, opacity .22s ease;
+            will-change: transform, opacity;
+          }}
+
+          /* ✅ NUEVO: ocultar al scrollear */
+          .lx-topbar.lx-hidden {{
+            transform: translateY(-110%);
+            opacity: 0;
+            pointer-events: none;
           }}
 
           .lx-topbar-inner {{
@@ -292,7 +303,7 @@ def render_top_ticker():
           }}
         </style>
 
-        <div class="lx-topbar">
+        <div id="lxTopbar" class="lx-topbar">
           <div class="lx-topbar-inner">
             <div class="lx-topbar-dot"></div>
             <div class="lx-marquee" aria-label="LexaCAE ticker">
@@ -303,6 +314,61 @@ def render_top_ticker():
             </div>
           </div>
         </div>
+
+        <script>
+        (function() {{
+          // ✅ Ocultar ticker al scrollear / mostrar cuando volvés arriba del todo
+          const TOP_THRESHOLD = 8; // px (0..8 cuenta como "arriba")
+          const BAR_ID = "lxTopbar";
+
+          function getScrollTop(doc) {{
+            try {{
+              return (doc.documentElement && doc.documentElement.scrollTop) || doc.body.scrollTop || 0;
+            }} catch(e) {{
+              return 0;
+            }}
+          }}
+
+          function setHidden(hidden) {{
+            try {{
+              const bar = window.parent.document.getElementById(BAR_ID) || document.getElementById(BAR_ID);
+              if (!bar) return;
+              if (hidden) bar.classList.add("lx-hidden");
+              else bar.classList.remove("lx-hidden");
+            }} catch(e) {{
+              // noop
+            }}
+          }}
+
+          function onScroll() {{
+            // probamos parent primero (muchas veces el scroll real está ahí)
+            let st = 0;
+            try {{
+              st = getScrollTop(window.parent.document);
+            }} catch(e) {{
+              st = getScrollTop(document);
+            }}
+            setHidden(st > TOP_THRESHOLD);
+          }}
+
+          // Attach listeners (en parent y en window por compat)
+          try {{
+            window.parent.addEventListener("scroll", onScroll, {{ passive: true }});
+          }} catch(e) {{}}
+          try {{
+            window.addEventListener("scroll", onScroll, {{ passive: true }});
+          }} catch(e) {{}}
+
+          // También reaccionar a cambios de layout
+          try {{
+            const obs = new MutationObserver(() => onScroll());
+            obs.observe(window.parent.document.body, {{ childList: true, subtree: true }});
+          }} catch(e) {{}}
+
+          // init
+          setTimeout(onScroll, 50);
+        }})();
+        </script>
         """,
         unsafe_allow_html=True,
     )
@@ -841,7 +907,6 @@ def _infer_afip_bucket(row: dict) -> str:
     if any(k in blob for k in ["ok", "aprob", "autoriz", "valid", "aprobada", "autorizada"]):
         return "OK"
     if afip:
-        # si el backend manda "A" / "R" etc, lo intentamos mapear
         if afip.upper() in ["A", "APROBADO", "APROBADA", "AUTORIZADO", "AUTORIZADA"]:
             return "OK"
         if afip.upper() in ["O", "OBS", "OBSERVADO", "OBSERVADA"]:
@@ -855,7 +920,6 @@ def _render_exec_summary(df: pd.DataFrame):
         return
 
     work = df.copy()
-    # asegurar columnas
     for col in ["Archivo", "CAE", "Estado", "AFIP", "Detalle AFIP"]:
         if col not in work.columns:
             work[col] = ""
@@ -896,7 +960,6 @@ def _render_exec_summary(df: pd.DataFrame):
         st.metric("Total", f"{total}")
         st.caption(f"Sin clasificar: {other}")
 
-    # Barra OK (pro)
     ratio_ok = min(1.0, max(0.0, (ok / total) if total else 0.0))
     st.caption("Progreso de OK (sobre total):")
     st.progress(ratio_ok)
@@ -909,12 +972,10 @@ def _apply_filters(df: pd.DataFrame, q: str, buckets: list):
 
     work = df.copy()
 
-    # asegurar columnas base
     for col in ["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]:
         if col not in work.columns:
             work[col] = ""
 
-    # bucket computed para filtrar
     work["_bucket"] = work.apply(lambda r: _infer_afip_bucket(r.to_dict()), axis=1)
 
     if buckets:
@@ -930,7 +991,6 @@ def _apply_filters(df: pd.DataFrame, q: str, buckets: list):
             mask = m if mask is None else (mask | m)
         work = work[mask].copy()
 
-    # limpiar helper col
     if "_bucket" in work.columns:
         work = work.drop(columns=["_bucket"], errors="ignore")
 
@@ -1146,12 +1206,10 @@ def render_validacion():
         if plan_limit is not None:
             st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
 
-            # ✅ NUEVO: barra de consumo del plan (se va llenando)
             if plan_limit and plan_limit > 0:
                 ratio = min(1.0, max(0.0, float(plan_used) / float(plan_limit)))
                 st.progress(ratio)
 
-                # ✅ TOP TICKER dinámico según consumo del plan
                 pct = int(ratio * 100)
                 if ratio >= 1.0:
                     set_top_ticker(
@@ -1214,7 +1272,6 @@ def render_validacion():
 
     st.divider()
 
-    # ✅ bloque de confianza + fuentes oficiales AFIP
     render_trust_wscdc_section()
 
     st.subheader("Carga de facturas")
@@ -1253,7 +1310,6 @@ def render_validacion():
             except zipfile.BadZipFile:
                 toast_err("ZIP inválido o dañado.")
 
-    # ===== Vista previa local =====
     rows = []
     if pdf_files:
         today = datetime.now().date()
@@ -1306,7 +1362,6 @@ def render_validacion():
 
     df_preview = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
 
-    # Persistimos el preview como resultado actual (hasta que se valide)
     if pdf_files:
         st.session_state.df_results = df_preview
 
@@ -1359,17 +1414,13 @@ def render_validacion():
                 toast_ok("AFIP OK — resultados listos.")
 
                 df_backend = pd.DataFrame(all_rows)
-
-                # Guardamos resultados finales
                 st.session_state.df_results = df_backend
-
                 st.dataframe(df_backend, use_container_width=True)
             else:
                 if getattr(status, "_state", "") != "error":
                     status.update(label="Sin resultados para mostrar.", state="complete")
                 toast_warn("No hubo resultados para mostrar (probá de nuevo).")
 
-    # ===================== RESULTADOS + KPIs + FILTRO/BUSCADOR =====================
     df = st.session_state.get("df_results")
     if df is None:
         df = pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
@@ -1377,7 +1428,6 @@ def render_validacion():
     if not df.empty:
         st.divider()
 
-        # ✅ Resumen ejecutivo (KPIs arriba)
         _render_exec_summary(df)
 
         st.subheader("Filtro / Buscador (Pro)")
@@ -1399,7 +1449,6 @@ def render_validacion():
         st.subheader("Resultados (filtrados)")
         st.dataframe(df_show, use_container_width=True)
 
-        # ===================== DESCARGAS (usan filtrado) =====================
         if "CAE" in df_show.columns:
             df_show = df_show.copy()
             df_show["CAE"] = df_show["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
@@ -1498,7 +1547,6 @@ def render_facturacion():
     cuit_tenant = st.text_input("CUIT emisor (11 dígitos, sin guiones)", key="ten_cuit")
     enabled = st.checkbox("Habilitado", value=True, key="ten_enabled")
 
-    # ===== Enterprise Secret Inputs (Opción B) =====
     sec = st.session_state.wsfe_secrets
 
     st.markdown("### Credenciales (seguras)")
