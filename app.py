@@ -512,7 +512,20 @@ st.set_page_config(
 )
 
 inject_enterprise_theme_light()
-render_top_ticker()
+
+# ===================== TOP TICKER (LIVE) =====================
+TICKER_SLOT = st.empty()
+
+def refresh_top_ticker():
+    with TICKER_SLOT:
+        render_top_ticker()
+
+def set_ticker_and_refresh(text: str, tone: str = "info"):
+    set_top_ticker(text, tone)
+    refresh_top_ticker()
+
+# Render inicial del ticker
+refresh_top_ticker()
 
 # ===================== HERO / HEADER =====================
 col1, col2 = st.columns([1, 2], vertical_alignment="center")
@@ -1104,6 +1117,12 @@ if not st.session_state.auth["logged"]:
 
 # ===================== PERFIL =====================
 def render_perfil():
+    # ✅ ticker default en páginas no-validación
+    set_ticker_and_refresh(
+        "🛡️ LexaCAE • Validación oficial AFIP (WSCDC) • Trazabilidad y auditoría • Soporte por WhatsApp",
+        "info"
+    )
+
     st.subheader("Mi perfil")
     st.caption("Acá podés ver y actualizar tus datos. Los cambios se guardan en el sistema.")
 
@@ -1243,17 +1262,17 @@ def render_validacion():
 
                 pct = int(ratio * 100)
                 if ratio >= 1.0:
-                    set_top_ticker(
+                    set_ticker_and_refresh(
                         f"🚫 Plan agotado ({plan_used}/{plan_limit}) • Renovación por WhatsApp disponible • Evitá cortar operaciones",
                         tone="danger",
                     )
                 elif ratio >= 0.85:
-                    set_top_ticker(
+                    set_ticker_and_refresh(
                         f"⚠️ Plan por agotarse ({plan_used}/{plan_limit} — {pct}%) • Recomendado renovar antes del límite",
                         tone="warn",
                     )
                 else:
-                    set_top_ticker(
+                    set_ticker_and_refresh(
                         f"🛡️ LexaCAE • Validación AFIP (WSCDC) • Plan OK: {plan_used}/{plan_limit} ({pct}%) • Resultados exportables",
                         tone="info",
                     )
@@ -1432,7 +1451,12 @@ def render_validacion():
                     status.update(label="Validación incompleta (hubo errores).", state="error")
                     st.error("Falló la validación con AFIP para uno de los lotes.")
                     st.caption(f"Detalle: {msg[:240]}")
+
                     if "límite de su plan" in msg.lower() or "plan_limit_reached" in msg.lower():
+                        set_ticker_and_refresh(
+                            "🚫 Plan agotado • No se puede validar más PDFs hasta renovar • Renovación por WhatsApp disponible",
+                            tone="danger",
+                        )
                         st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
                     break
 
@@ -1565,6 +1589,12 @@ def _money_fmt(x: float) -> str:
 
 # ===================== PÁGINA: FACTURACIÓN WSFEv1 =====================
 def render_facturacion():
+    # ✅ ticker default en páginas no-validación
+    set_ticker_and_refresh(
+        "🛡️ LexaCAE • Validación oficial AFIP (WSCDC) • Trazabilidad y auditoría • Soporte por WhatsApp",
+        "info"
+    )
+
     lex_card_open()
     st.info(
         "Facturación (WSFEv1): emisión de comprobantes con CAE. "
