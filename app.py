@@ -519,6 +519,15 @@ def ensure_wsfe_secrets_state():
 
 ensure_wsfe_secrets_state()
 
+# NUEVO: resultados persistentes (para no perder al hacer filtros / rerun)
+def ensure_results_state():
+    if "df_results" not in st.session_state:
+        st.session_state.df_results = pd.DataFrame(
+            columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]
+        )
+
+ensure_results_state()
+
 def _clean_b64(s: str) -> str:
     return re.sub(r"\s+", "", (s or "").strip())
 
@@ -673,75 +682,128 @@ def _wa_renew_url() -> str:
     txt = urllib.parse.quote(RENEW_TEXT or "")
     return f"https://wa.me/{phone}?text={txt}"
 
-# ===================== UI: TABLAS CON CHIPS (BADGES) + MEJOR LECTURA =====================
-def _chip_style(value: str) -> str:
-    """
-    Devuelve CSS para simular chips (badges) con Styler.
-    Ajustá keywords según tus outputs reales.
-    """
-    v = (str(value or "")).lower()
+# ===================== KPI / FILTER HELPERS (VALIDACIÓN) =====================
+def _as_str(x) -> str:
+    try:
+        if x is None:
+            return ""
+        if isinstance(x, float) and pd.isna(x):
+            return ""
+        return str(x)
+    except Exception:
+        return ""
 
-    if "vigente" in v or "ok" in v or "autoriz" in v or "aprob" in v or "acept" in v:
-        return (
-            "background-color: rgba(34,197,94,.18); "
-            "border: 1px solid rgba(34,197,94,.35); "
-            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
-        )
-    if "vencid" in v or "rechaz" in v or "error" in v or "inval" in v:
-        return (
-            "background-color: rgba(239,68,68,.14); "
-            "border: 1px solid rgba(239,68,68,.35); "
-            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
-        )
-    if "observ" in v or "revis" in v or "pend" in v or "formato" in v:
-        return (
-            "background-color: rgba(245,158,11,.16); "
-            "border: 1px solid rgba(245,158,11,.35); "
-            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
-        )
-    if "no encontrado" in v or "no detect" in v or v.strip() == "":
-        return (
-            "background-color: rgba(148,163,184,.18); "
-            "border: 1px solid rgba(148,163,184,.38); "
-            "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
-        )
+def _infer_afip_bucket(row: dict) -> str:
+    """
+    Normaliza a 3 buckets: OK / OBSERVADA / RECHAZADA / SIN_DATOS
+    (heurística robusta para distintos backends)
+    """
+    afip = _as_str(row.get("AFIP", "")).strip()
+    det = _as_str(row.get("Detalle AFIP", "")).strip()
+    estado = _as_str(row.get("Estado", "")).strip()
+    blob = f"{afip} {det} {estado}".lower()
 
-    return (
-        "background-color: rgba(37,99,235,.10); "
-        "border: 1px solid rgba(37,99,235,.25); "
-        "border-radius: 999px; padding: 2px 10px; font-weight: 650;"
+    if any(k in blob for k in ["rechaz", "rejected", "error", "inval", "no autorizado"]):
+        return "RECHAZADA"
+    if "observ" in blob:
+        return "OBSERVADA"
+    if any(k in blob for k in ["ok", "aprob", "autoriz", "valid", "aprobada", "autorizada"]):
+        return "OK"
+    if afip:
+        # si el backend manda "A" / "R" etc, lo intentamos mapear
+        if afip.upper() in ["A", "APROBADO", "APROBADA", "AUTORIZADO", "AUTORIZADA"]:
+            return "OK"
+        if afip.upper() in ["O", "OBS", "OBSERVADO", "OBSERVADA"]:
+            return "OBSERVADA"
+        if afip.upper() in ["R", "RECHAZADO", "RECHAZADA"]:
+            return "RECHAZADA"
+    return "SIN_DATOS"
+
+def _render_exec_summary(df: pd.DataFrame):
+    if df is None or df.empty:
+        return
+
+    work = df.copy()
+    # asegurar columnas
+    for col in ["Archivo", "CAE", "Estado", "AFIP", "Detalle AFIP"]:
+        if col not in work.columns:
+            work[col] = ""
+
+    buckets = work.apply(lambda r: _infer_afip_bucket(r.to_dict()), axis=1)
+    work["_bucket"] = buckets
+
+    total = int(len(work))
+    ok = int((work["_bucket"] == "OK").sum())
+    obs = int((work["_bucket"] == "OBSERVADA").sum())
+    rej = int((work["_bucket"] == "RECHAZADA").sum())
+    other = total - ok - obs - rej
+
+    ok_pct = int(round((ok / total) * 100)) if total else 0
+    obs_pct = int(round((obs / total) * 100)) if total else 0
+    rej_pct = int(round((rej / total) * 100)) if total else 0
+
+    lex_card_open()
+    st.markdown(
+        """
+        <div class="lex-badge">📊 Resumen ejecutivo • KPIs</div>
+        <p class="lex-title" style="margin-top:10px; font-size:1.25rem;">Estado general de validación</p>
+        """,
+        unsafe_allow_html=True,
     )
 
-def _render_table_with_chips(df: pd.DataFrame):
-    """
-    Render de dataframe con chips para columnas clave.
-    """
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("% OK", f"{ok_pct}%")
+        st.caption(f"{ok} de {total}")
+    with c2:
+        st.metric("% Observadas", f"{obs_pct}%")
+        st.caption(f"{obs} de {total}")
+    with c3:
+        st.metric("% Rechazadas", f"{rej_pct}%")
+        st.caption(f"{rej} de {total}")
+    with c4:
+        st.metric("Total", f"{total}")
+        st.caption(f"Sin clasificar: {other}")
+
+    # Barra OK (pro)
+    ratio_ok = min(1.0, max(0.0, (ok / total) if total else 0.0))
+    st.caption("Progreso de OK (sobre total):")
+    st.progress(ratio_ok)
+
+    lex_card_close()
+
+def _apply_filters(df: pd.DataFrame, q: str, buckets: list):
     if df is None:
-        st.dataframe(df, use_container_width=True)
-        return
+        return df
 
-    if df.empty:
-        st.dataframe(df, use_container_width=True)
-        return
+    work = df.copy()
 
-    chip_cols = [c for c in ["Estado", "AFIP"] if c in df.columns]
+    # asegurar columnas base
+    for col in ["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"]:
+        if col not in work.columns:
+            work[col] = ""
 
-    styler = df.style
-    styler = styler.set_properties(**{
-        "font-size": "0.95rem",
-        "vertical-align": "middle",
-    })
+    # bucket computed para filtrar
+    work["_bucket"] = work.apply(lambda r: _infer_afip_bucket(r.to_dict()), axis=1)
 
-    if chip_cols:
-        for col in chip_cols:
-            styler = styler.applymap(_chip_style, subset=[col])
+    if buckets:
+        work = work[work["_bucket"].isin(buckets)].copy()
 
-    styler = styler.set_table_styles([
-        {"selector": "thead th", "props": [("font-weight", "750"), ("border-bottom", "1px solid rgba(15,23,42,.12)")]},
-        {"selector": "tbody td", "props": [("border-bottom", "1px solid rgba(15,23,42,.08)")]},
-    ])
+    q = (q or "").strip().lower()
+    if q:
+        cols = ["Archivo", "CAE", "Estado", "AFIP", "Detalle AFIP"]
+        mask = None
+        for c in cols:
+            s = work[c].astype(str).fillna("").str.lower()
+            m = s.str.contains(re.escape(q), regex=True)
+            mask = m if mask is None else (mask | m)
+        work = work[mask].copy()
 
-    st.dataframe(styler, use_container_width=True, hide_index=True)
+    # limpiar helper col
+    if "_bucket" in work.columns:
+        work = work.drop(columns=["_bucket"], errors="ignore")
+
+    return work
 
 # ===================== SIDEBAR: LOGIN + NAV =====================
 with st.sidebar:
@@ -953,14 +1015,18 @@ def render_validacion():
         if plan_limit is not None:
             st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
 
-            # ✅ NUEVO: Barra de progreso del plan
+            # ✅ NUEVO: barra de consumo del plan (se va llenando)
             if plan_limit and plan_limit > 0:
                 ratio = min(1.0, max(0.0, float(plan_used) / float(plan_limit)))
                 st.progress(ratio)
-                st.caption(f"Consumo: **{plan_used}** / **{plan_limit}** ( {int(ratio*100)}% )")
+                if ratio >= 1.0:
+                    st.error("🚫 Plan agotado. Renovalo para seguir validando.")
+                elif ratio >= 0.85:
+                    st.warning("⚠️ Te estás quedando sin plan. Te conviene renovar antes de cortar operaciones.")
+                else:
+                    st.caption(f"Consumo: **{plan_used}** / **{plan_limit}** ({int(ratio * 100)}%)")
 
             if plan_blocked:
-                st.error("🚫 Llegaste al límite de tu plan. Renovalo para seguir validando.")
                 st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
 
     st.subheader("Resumen de uso del mes")
@@ -998,7 +1064,7 @@ def render_validacion():
 
     st.divider()
 
-    # ✅ NUEVO: bloque de confianza + fuentes oficiales AFIP (antes de cargar PDFs)
+    # ✅ bloque de confianza + fuentes oficiales AFIP
     render_trust_wscdc_section()
 
     st.subheader("Carga de facturas")
@@ -1037,6 +1103,7 @@ def render_validacion():
             except zipfile.BadZipFile:
                 toast_err("ZIP inválido o dañado.")
 
+    # ===== Vista previa local =====
     rows = []
     if pdf_files:
         today = datetime.now().date()
@@ -1087,10 +1154,14 @@ def render_validacion():
 
             progress.progress(i / len(pdf_files))
 
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
+    df_preview = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
+
+    # Persistimos el preview como resultado actual (hasta que se valide)
+    if pdf_files:
+        st.session_state.df_results = df_preview
 
     st.subheader("Vista previa PDF cargados")
-    _render_table_with_chips(df)
+    st.dataframe(df_preview, use_container_width=True)
 
     st.subheader("Validación contra AFIP")
     st.caption("Validamos contra AFIP y devolvemos el estado por archivo.")
@@ -1136,24 +1207,60 @@ def render_validacion():
             if all_rows:
                 status.update(label="Validación completada.", state="complete")
                 toast_ok("AFIP OK — resultados listos.")
-                df = pd.DataFrame(all_rows)
-                _render_table_with_chips(df)
+
+                df_backend = pd.DataFrame(all_rows)
+
+                # Guardamos resultados finales
+                st.session_state.df_results = df_backend
+
+                st.dataframe(df_backend, use_container_width=True)
             else:
                 if getattr(status, "_state", "") != "error":
                     status.update(label="Sin resultados para mostrar.", state="complete")
                 toast_warn("No hubo resultados para mostrar (probá de nuevo).")
 
+    # ===================== RESULTADOS + KPIs + FILTRO/BUSCADOR =====================
+    df = st.session_state.get("df_results")
+    if df is None:
+        df = pd.DataFrame(columns=["Archivo", "CAE", "Vto CAE", "Estado", "AFIP", "Detalle AFIP"])
+
     if not df.empty:
-        if "CAE" in df.columns:
-            df["CAE"] = df["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
-        if "Estado" in df.columns:
-            df["Estado"] = df["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
+        st.divider()
+
+        # ✅ Resumen ejecutivo (KPIs arriba)
+        _render_exec_summary(df)
+
+        st.subheader("Filtro / Buscador (Pro)")
+        st.caption("Buscá por **CUIT / CAE / archivo / estado** y filtrá por resultado AFIP.")
+
+        cF1, cF2 = st.columns([2, 1])
+        with cF1:
+            q = st.text_input("Buscar", placeholder="Ej: 3071... / 7439... / Factura_001 / observado", key="filter_q")
+        with cF2:
+            buckets = st.multiselect(
+                "Resultado",
+                options=["OK", "OBSERVADA", "RECHAZADA", "SIN_DATOS"],
+                default=[],
+                key="filter_bucket",
+            )
+
+        df_show = _apply_filters(df, q, buckets)
+
+        st.subheader("Resultados (filtrados)")
+        st.dataframe(df_show, use_container_width=True)
+
+        # ===================== DESCARGAS (usan filtrado) =====================
+        if "CAE" in df_show.columns:
+            df_show = df_show.copy()
+            df_show["CAE"] = df_show["CAE"].astype(str).apply(lambda x: f"'{x}" if x and x != "nan" else "")
+        if "Estado" in df_show.columns:
+            df_show["Estado"] = df_show["Estado"].astype(str).str.replace("\n", " ", regex=False).str.strip()
 
         st.subheader("Descargas")
         col1, col2 = st.columns(2)
 
         with col1:
-            csv_bytes = df.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+            csv_bytes = df_show.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
             st.download_button(
                 "Descargar CSV (.csv)",
                 data=csv_bytes,
@@ -1165,7 +1272,7 @@ def render_validacion():
         with col2:
             xlsx_buffer = io.BytesIO()
             with pd.ExcelWriter(xlsx_buffer, engine="xlsxwriter") as writer:
-                df.to_excel(writer, index=False, sheet_name="Resultados")
+                df_show.to_excel(writer, index=False, sheet_name="Resultados")
             st.download_button(
                 "Descargar Excel (.xlsx)",
                 data=xlsx_buffer.getvalue(),
@@ -1197,10 +1304,7 @@ def _items_df_normalize(df_items: pd.DataFrame) -> pd.DataFrame:
     df2["Descripción"] = df2["Descripción"].astype(str).fillna("").str.strip()
     df2["Cantidad"] = df2["Cantidad"].apply(lambda v: _safe_float(v, 0.0))
     df2["Precio Unit."] = df2["Precio Unit."].apply(lambda v: _safe_float(v, 0.0))
-    df2["Subtotal"] = df2.apply(
-        lambda r: round(_safe_float(r.get("Cantidad"), 0.0) * _safe_float(r.get("Precio Unit."), 0.0), 2),
-        axis=1
-    )
+    df2["Subtotal"] = df2.apply(lambda r: round(_safe_float(r.get("Cantidad"), 0.0) * _safe_float(r.get("Precio Unit."), 0.0), 2), axis=1)
     df2 = df2[(df2["Descripción"] != "") | (df2["Cantidad"] != 0) | (df2["Precio Unit."] != 0)]
     df2 = df2.reset_index(drop=True)
     return df2
@@ -1456,13 +1560,7 @@ def render_facturacion():
 
     colr1, colr2 = st.columns(2)
     with colr1:
-        doc_tipo = st.selectbox(
-            "DocTipo receptor",
-            options=[80, 96],
-            index=0,
-            format_func=lambda x: {80: "80 - CUIT", 96: "96 - DNI"}[x],
-            key="emit_doct"
-        )
+        doc_tipo = st.selectbox("DocTipo receptor", options=[80, 96], index=0, format_func=lambda x: {80: "80 - CUIT", 96: "96 - DNI"}[x], key="emit_doct")
     with colr2:
         doc_nro = st.text_input("DocNro receptor (CUIT 11 / DNI 7-8)", key="emit_docn")
 
@@ -1667,7 +1765,7 @@ def render_facturacion():
                         "cae": cae,
                         "cae_vto": cae_vto,
                         "resultado": resp.get("resultado"),
-                        "items": items_payload,  # backend /wsfe/pdf debe soportar items
+                        "items": items_payload,
                     })
 
                     colpdf1, colpdf2 = st.columns(2)
