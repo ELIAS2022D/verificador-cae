@@ -220,36 +220,44 @@ def render_top_ticker():
     st.markdown(
         f"""
         <style>
-          /* Reservar espacio arriba para que no tape el contenido */
-          section.main > div {{ padding-top: 4.25rem !important; }}
-
-          /* ✅ GUTTER para no tapar los controles nativos (⋮ / contraer sidebar) */
+          /* ✅ ancho "de la página" (igual al block-container) */
           :root {{
-            --lx-gutter-left: 72px;
+            --lx-page-width: 1200px;       /* <- cambiá esto si tocás tu max-width */
+            --lx-page-pad-x: 0px;          /* opcional si querés sumar un poquito */
+            --lx-gutter-left: 72px;        /* para no tapar ⋮ / sidebar toggle */
+            --lx-topbar-pad-y: 14px;       /* ✅ más alto (antes 10px) */
           }}
 
+          /* Reservar espacio arriba para que no tape el contenido */
+          section.main > div {{ padding-top: 4.75rem !important; }} /* ✅ un poco más (antes 4.25rem) */
+
+          /* ====== CONTENEDOR FIXED: centrado al ancho de la página ====== */
           .lx-topbar {{
             position: fixed;
             top: 0;
-            left: 0;
-            right: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: calc(var(--lx-page-width) + var(--lx-page-pad-x));
             z-index: 999999;
 
-            /* El contenedor NO debe bloquear clicks en el gutter */
             pointer-events: none;
-
-            /* El panel lo pintamos con ::before */
             background: transparent !important;
             box-shadow: none !important;
             border: none !important;
 
-            transform: translateY(0);
             opacity: 1;
             transition: transform .22s ease, opacity .22s ease;
             will-change: transform, opacity;
           }}
 
-          /* Panel real (arranca después del gutter) */
+          /* ocultar al scrollear */
+          .lx-topbar.lx-hidden {{
+            transform: translateX(-50%) translateY(-110%);
+            opacity: 0;
+            pointer-events: none;
+          }}
+
+          /* Panel real: ocupa el ancho del topbar, pero deja el gutter libre */
           .lx-topbar::before {{
             content: "";
             position: absolute;
@@ -257,6 +265,8 @@ def render_top_ticker():
             right: 0;
             bottom: 0;
             left: 0;
+
+            /* ✅ deja libre el gutter para clicks */
             margin-left: var(--lx-gutter-left);
 
             backdrop-filter: blur(12px);
@@ -264,26 +274,20 @@ def render_top_ticker():
             background: {tone_bg};
             border-bottom: 1px solid {tone_border};
             box-shadow: 0 12px 28px rgba(15,23,42,.10);
+            border-radius: 0 0 14px 14px;
           }}
 
-          /* ✅ ocultar al scrollear */
-          .lx-topbar.lx-hidden {{
-            transform: translateY(-110%);
-            opacity: 0;
-            pointer-events: none;
-          }}
-
+          /* Contenido centrado (igual de ancho que la página) */
           .lx-topbar-inner {{
             position: relative;
-            max-width: 1200px;
+            width: 100%;
             margin: 0 auto;
-            padding: 10px 16px;
+            padding: var(--lx-topbar-pad-y) 16px;   /* ✅ más alto */
             padding-left: calc(16px + var(--lx-gutter-left));
             display: flex;
             align-items: center;
             gap: 12px;
 
-            /* Solo el contenido del ticker recibe clicks */
             pointer-events: auto;
           }}
 
@@ -315,7 +319,6 @@ def render_top_ticker():
             letter-spacing: .2px;
             color: rgba(15,23,42,.86);
           }}
-
           .lx-item b {{
             font-weight: 800;
             color: rgba(15,23,42,.92);
@@ -328,10 +331,26 @@ def render_top_ticker():
 
           .lx-topbar:hover .lx-track {{ animation-play-state: paused; }}
 
+          /* responsive */
+          @media (max-width: 1280px) {{
+            :root {{ --lx-page-width: 100%; }}
+            .lx-topbar {{
+              width: 100%;
+              left: 0;
+              transform: none;
+            }}
+            .lx-topbar.lx-hidden {{
+              transform: translateY(-110%);
+            }}
+          }}
+
           @media (max-width: 720px) {{
-            :root {{ --lx-gutter-left: 64px; }}
+            :root {{
+              --lx-gutter-left: 64px;
+              --lx-topbar-pad-y: 13px;
+            }}
             .lx-item {{ font-size: 12px; }}
-            section.main > div {{ padding-top: 4.0rem !important; }}
+            section.main > div {{ padding-top: 4.55rem !important; }}
           }}
         </style>
 
@@ -379,12 +398,8 @@ def render_top_ticker():
             setHidden(st > TOP_THRESHOLD);
           }}
 
-          try {{
-            window.parent.addEventListener("scroll", onScroll, {{ passive: true }});
-          }} catch(e) {{}}
-          try {{
-            window.addEventListener("scroll", onScroll, {{ passive: true }});
-          }} catch(e) {{}}
+          try {{ window.parent.addEventListener("scroll", onScroll, {{ passive: true }}); }} catch(e) {{}}
+          try {{ window.addEventListener("scroll", onScroll, {{ passive: true }}); }} catch(e) {{}}
 
           try {{
             const obs = new MutationObserver(() => onScroll());
