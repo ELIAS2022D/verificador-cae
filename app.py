@@ -220,8 +220,13 @@ def render_top_ticker():
     st.markdown(
         f"""
         <style>
-          /* Reservar espacio arriba para que no tape el contenido (NO cambiamos esto al ocultar para evitar saltos) */
+          /* Reservar espacio arriba para que no tape el contenido */
           section.main > div {{ padding-top: 4.25rem !important; }}
+
+          /* ✅ GUTTER para no tapar los controles nativos (⋮ / contraer sidebar) */
+          :root {{
+            --lx-gutter-left: 72px;
+          }}
 
           .lx-topbar {{
             position: fixed;
@@ -229,18 +234,39 @@ def render_top_ticker():
             left: 0;
             right: 0;
             z-index: 999999;
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            background: {tone_bg};
-            border-bottom: 1px solid {tone_border};
-            box-shadow: 0 12px 28px rgba(15,23,42,.10);
+
+            /* El contenedor NO debe bloquear clicks en el gutter */
+            pointer-events: none;
+
+            /* El panel lo pintamos con ::before */
+            background: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+
             transform: translateY(0);
             opacity: 1;
             transition: transform .22s ease, opacity .22s ease;
             will-change: transform, opacity;
           }}
 
-          /* ✅ NUEVO: ocultar al scrollear */
+          /* Panel real (arranca después del gutter) */
+          .lx-topbar::before {{
+            content: "";
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            margin-left: var(--lx-gutter-left);
+
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            background: {tone_bg};
+            border-bottom: 1px solid {tone_border};
+            box-shadow: 0 12px 28px rgba(15,23,42,.10);
+          }}
+
+          /* ✅ ocultar al scrollear */
           .lx-topbar.lx-hidden {{
             transform: translateY(-110%);
             opacity: 0;
@@ -248,12 +274,17 @@ def render_top_ticker():
           }}
 
           .lx-topbar-inner {{
+            position: relative;
             max-width: 1200px;
             margin: 0 auto;
             padding: 10px 16px;
+            padding-left: calc(16px + var(--lx-gutter-left));
             display: flex;
             align-items: center;
             gap: 12px;
+
+            /* Solo el contenido del ticker recibe clicks */
+            pointer-events: auto;
           }}
 
           .lx-topbar-dot {{
@@ -298,6 +329,7 @@ def render_top_ticker():
           .lx-topbar:hover .lx-track {{ animation-play-state: paused; }}
 
           @media (max-width: 720px) {{
+            :root {{ --lx-gutter-left: 64px; }}
             .lx-item {{ font-size: 12px; }}
             section.main > div {{ padding-top: 4.0rem !important; }}
           }}
@@ -317,8 +349,7 @@ def render_top_ticker():
 
         <script>
         (function() {{
-          // ✅ Ocultar ticker al scrollear / mostrar cuando volvés arriba del todo
-          const TOP_THRESHOLD = 8; // px (0..8 cuenta como "arriba")
+          const TOP_THRESHOLD = 8;
           const BAR_ID = "lxTopbar";
 
           function getScrollTop(doc) {{
@@ -335,13 +366,10 @@ def render_top_ticker():
               if (!bar) return;
               if (hidden) bar.classList.add("lx-hidden");
               else bar.classList.remove("lx-hidden");
-            }} catch(e) {{
-              // noop
-            }}
+            }} catch(e) {{}}
           }}
 
           function onScroll() {{
-            // probamos parent primero (muchas veces el scroll real está ahí)
             let st = 0;
             try {{
               st = getScrollTop(window.parent.document);
@@ -351,7 +379,6 @@ def render_top_ticker():
             setHidden(st > TOP_THRESHOLD);
           }}
 
-          // Attach listeners (en parent y en window por compat)
           try {{
             window.parent.addEventListener("scroll", onScroll, {{ passive: true }});
           }} catch(e) {{}}
@@ -359,13 +386,11 @@ def render_top_ticker():
             window.addEventListener("scroll", onScroll, {{ passive: true }});
           }} catch(e) {{}}
 
-          // También reaccionar a cambios de layout
           try {{
             const obs = new MutationObserver(() => onScroll());
             obs.observe(window.parent.document.body, {{ childList: true, subtree: true }});
           }} catch(e) {{}}
 
-          // init
           setTimeout(onScroll, 50);
         }})();
         </script>
@@ -687,7 +712,6 @@ def ensure_auth_state():
 
 ensure_auth_state()
 
-# NUEVO: items para PDF (facturación)
 def ensure_wsfe_items_state():
     if "wsfe_items_df" not in st.session_state:
         st.session_state.wsfe_items_df = pd.DataFrame(
@@ -696,7 +720,6 @@ def ensure_wsfe_items_state():
 
 ensure_wsfe_items_state()
 
-# NUEVO: secretos tenant (enterprise)
 def ensure_wsfe_secrets_state():
     if "wsfe_secrets" not in st.session_state:
         st.session_state.wsfe_secrets = {
@@ -716,7 +739,6 @@ def ensure_wsfe_secrets_state():
 
 ensure_wsfe_secrets_state()
 
-# NUEVO: resultados persistentes (para no perder al hacer filtros / rerun)
 def ensure_results_state():
     if "df_results" not in st.session_state:
         st.session_state.df_results = pd.DataFrame(
@@ -740,10 +762,8 @@ def _load_file_to_b64(uploaded_file) -> str:
     if not uploaded_file:
         return ""
     raw = uploaded_file.getvalue()
-    # Si el archivo ya es base64 (texto), lo respetamos.
     try:
         txt = raw.decode("utf-8", errors="ignore").strip()
-        # heurística: si tiene muchos chars base64, lo tomamos como base64
         if len(txt) > 80 and re.fullmatch(r"[A-Za-z0-9+/=\s\r\n]+", txt):
             return _clean_b64(txt)
     except Exception:
@@ -891,10 +911,6 @@ def _as_str(x) -> str:
         return ""
 
 def _infer_afip_bucket(row: dict) -> str:
-    """
-    Normaliza a 3 buckets: OK / OBSERVADA / RECHAZADA / SIN_DATOS
-    (heurística robusta para distintos backends)
-    """
     afip = _as_str(row.get("AFIP", "")).strip()
     det = _as_str(row.get("Detalle AFIP", "")).strip()
     estado = _as_str(row.get("Estado", "")).strip()
