@@ -177,6 +177,136 @@ def toast_err(msg: str):
     except Exception:
         st.error(msg)
 
+# ===================== TOP NAV TICKER (GLOBAL) =====================
+def ensure_ticker_state():
+    if "top_ticker" not in st.session_state:
+        st.session_state.top_ticker = {
+            "text": "🛡️ LexaCAE • Validación oficial AFIP (WSCDC) • Trazabilidad y auditoría • Soporte por WhatsApp",
+            "tone": "info",  # info | warn | danger
+        }
+
+ensure_ticker_state()
+
+def set_top_ticker(text: str, tone: str = "info"):
+    st.session_state.top_ticker = {
+        "text": (text or "").strip(),
+        "tone": (tone or "info").strip().lower(),
+    }
+
+def render_top_ticker():
+    data = st.session_state.get("top_ticker") or {}
+    text = (data.get("text") or "").strip()
+    tone = (data.get("tone") or "info").strip().lower()
+
+    tone_border = {
+        "info": "rgba(37,99,235,.22)",
+        "warn": "rgba(245,158,11,.26)",
+        "danger": "rgba(239,68,68,.28)",
+    }.get(tone, "rgba(37,99,235,.22)")
+
+    tone_bg = {
+        "info": "linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.52))",
+        "warn": "linear-gradient(180deg, rgba(255,247,237,.75), rgba(255,255,255,.50))",
+        "danger": "linear-gradient(180deg, rgba(254,242,242,.78), rgba(255,255,255,.50))",
+    }.get(tone, "linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.52))")
+
+    safe_text = (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+    st.markdown(
+        f"""
+        <style>
+          /* Reservar espacio arriba para que no tape el contenido */
+          section.main > div {{ padding-top: 4.25rem !important; }}
+
+          .lx-topbar {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 999999;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            background: {tone_bg};
+            border-bottom: 1px solid {tone_border};
+            box-shadow: 0 12px 28px rgba(15,23,42,.10);
+          }}
+
+          .lx-topbar-inner {{
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 10px 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+          }}
+
+          .lx-topbar-dot {{
+            width: 9px; height: 9px; border-radius: 999px;
+            background: rgba(37,99,235,.90);
+            box-shadow: 0 0 0 6px rgba(37,99,235,.12);
+            flex: 0 0 auto;
+          }}
+
+          .lx-marquee {{
+            position: relative;
+            overflow: hidden;
+            white-space: nowrap;
+            flex: 1 1 auto;
+          }}
+
+          .lx-track {{
+            display: inline-flex;
+            gap: 24px;
+            align-items: center;
+            will-change: transform;
+            animation: lx-scroll 22s linear infinite;
+          }}
+
+          .lx-item {{
+            font-size: 13px;
+            font-weight: 650;
+            letter-spacing: .2px;
+            color: rgba(15,23,42,.86);
+          }}
+
+          .lx-item b {{
+            font-weight: 800;
+            color: rgba(15,23,42,.92);
+          }}
+
+          @keyframes lx-scroll {{
+            0%   {{ transform: translateX(0); }}
+            100% {{ transform: translateX(-50%); }}
+          }}
+
+          .lx-topbar:hover .lx-track {{ animation-play-state: paused; }}
+
+          @media (max-width: 720px) {{
+            .lx-item {{ font-size: 12px; }}
+            section.main > div {{ padding-top: 4.0rem !important; }}
+          }}
+        </style>
+
+        <div class="lx-topbar">
+          <div class="lx-topbar-inner">
+            <div class="lx-topbar-dot"></div>
+            <div class="lx-marquee" aria-label="LexaCAE ticker">
+              <div class="lx-track">
+                <div class="lx-item">{safe_text}</div>
+                <div class="lx-item">{safe_text}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # ===================== BLOQUEAR ENTER EN PASSWORD =====================
 def block_enter_on_password_inputs():
     st.markdown(
@@ -276,6 +406,7 @@ st.set_page_config(
 )
 
 inject_enterprise_theme_light()
+render_top_ticker()
 
 # ===================== HERO / HEADER =====================
 col1, col2 = st.columns([1, 2], vertical_alignment="center")
@@ -1015,10 +1146,29 @@ def render_validacion():
         if plan_limit is not None:
             st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
 
-            # ✅ barra de consumo del plan
+            # ✅ NUEVO: barra de consumo del plan (se va llenando)
             if plan_limit and plan_limit > 0:
                 ratio = min(1.0, max(0.0, float(plan_used) / float(plan_limit)))
                 st.progress(ratio)
+
+                # ✅ TOP TICKER dinámico según consumo del plan
+                pct = int(ratio * 100)
+                if ratio >= 1.0:
+                    set_top_ticker(
+                        f"🚫 Plan agotado ({plan_used}/{plan_limit}) • Renovación por WhatsApp disponible • Evitá cortar operaciones",
+                        tone="danger",
+                    )
+                elif ratio >= 0.85:
+                    set_top_ticker(
+                        f"⚠️ Plan por agotarse ({plan_used}/{plan_limit} — {pct}%) • Recomendado renovar antes del límite",
+                        tone="warn",
+                    )
+                else:
+                    set_top_ticker(
+                        f"🛡️ LexaCAE • Validación AFIP (WSCDC) • Plan OK: {plan_used}/{plan_limit} ({pct}%) • Resultados exportables",
+                        tone="info",
+                    )
+
                 if ratio >= 1.0:
                     st.error("🚫 Plan agotado. Renovalo para seguir validando.")
                 elif ratio >= 0.85:
