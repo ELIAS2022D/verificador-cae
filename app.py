@@ -206,6 +206,65 @@ def block_enter_on_password_inputs():
         unsafe_allow_html=True,
     )
 
+# ===================== TRUST CARD (ANTES DE CARGA) =====================
+AFIP_WSCDC_MANUAL_URL = "https://www.afip.gob.ar/ws/WSCDCV1/ManualDelDesarrolladorWSCDCV1.pdf"
+AFIP_CAE_PUBLIC_URL = "https://servicioscf.afip.gob.ar/publico/comprobantes/cae.aspx"
+
+def render_trust_wscdc_section():
+    """
+    Sección enterprise para reforzar confianza:
+    - Explica que la validación final depende de AFIP (WSCDC)
+    - Link a manual oficial WSCDC
+    - Link a consulta pública CAE (AFIP)
+    """
+    lex_card_open()
+    st.markdown(
+        f"""
+        <div class="lex-badge">🔒 Validación oficial • WSCDC (AFIP) • Trazabilidad</div>
+        <p class="lex-title" style="margin-top:10px; font-size:1.35rem;">
+          Verificación con fuente oficial (AFIP)
+        </p>
+        <p class="lex-sub" style="margin-top:6px;">
+          Para que tengas tranquilidad: LexaCAE contrasta la información del comprobante contra
+          <b>AFIP</b> usando el Web Service <b>WSCDC (ComprobanteConstatar)</b>.
+          Acá tenés la guía oficial para auditar el proceso y entender qué se valida.
+        </p>
+
+        <div style="display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:10px; margin-top:12px;">
+          <div style="border:1px solid rgba(15,23,42,.10); border-radius:14px; padding:12px; background:rgba(255,255,255,.75);">
+            <div style="font-weight:750;">🧾 Qué validamos</div>
+            <div class="lex-muted" style="font-size:.92rem; margin-top:6px;">
+              CAE, emisor/receptor, tipo y nro de comprobante, fecha y consistencia general (según respuesta WSCDC).
+            </div>
+          </div>
+
+          <div style="border:1px solid rgba(15,23,42,.10); border-radius:14px; padding:12px; background:rgba(255,255,255,.75);">
+            <div style="font-weight:750;">🛡️ Confiabilidad</div>
+            <div class="lex-muted" style="font-size:.92rem; margin-top:6px;">
+              La respuesta final se apoya en servicios oficiales. Si AFIP responde “Observado/Rechazado”, lo ves reflejado.
+            </div>
+          </div>
+
+          <div style="border:1px solid rgba(15,23,42,.10); border-radius:14px; padding:12px; background:rgba(255,255,255,.75);">
+            <div style="font-weight:750;">🔐 Privacidad</div>
+            <div class="lex-muted" style="font-size:.92rem; margin-top:6px;">
+              Primero hacemos lectura local del PDF (CAE/Vto). Luego consultamos AFIP para confirmar estado y autorización.
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns([1.2, 1.2, 2.6])
+    with c1:
+        st.link_button("📘 Guía oficial WSCDC (AFIP)", AFIP_WSCDC_MANUAL_URL, use_container_width=True)
+    with c2:
+        st.link_button("🔎 Consulta pública CAE (AFIP)", AFIP_CAE_PUBLIC_URL, use_container_width=True)
+    with c3:
+        st.caption("Tip: abrí el manual y buscá “ComprobanteConstatar” para ver contrato, campos y códigos de error.")
+    lex_card_close()
+
 # ===================== BRANDING + CONFIG =====================
 icon = Image.open("assets/logo_Sitio.png")
 
@@ -453,6 +512,8 @@ def ensure_wsfe_secrets_state():
             "key_source": "",
             "cert_len": 0,
             "key_len": 0,
+            "cert_file_sig": "",
+            "key_file_sig": "",
         }
 
 ensure_wsfe_secrets_state()
@@ -858,6 +919,9 @@ def render_validacion():
                     toast_ok("Email enviado correctamente.")
 
     st.divider()
+
+    # ✅ NUEVO: bloque de confianza + fuentes oficiales AFIP (antes de cargar PDFs)
+    render_trust_wscdc_section()
 
     st.subheader("Carga de facturas")
 
