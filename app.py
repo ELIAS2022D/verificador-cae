@@ -181,7 +181,7 @@ def toast_err(msg: str):
 def ensure_ticker_state():
     if "top_ticker" not in st.session_state:
         st.session_state.top_ticker = {
-            "text": "🛡️ LexaCAE • Validación oficial AFIP (WSCDC) • Trazabilidad y auditoría • Soporte por WhatsApp",
+            "text": "",      # ✅ vacío por defecto (solo mostramos estado de cuenta)
             "tone": "info",  # info | warn | danger
         }
 
@@ -193,10 +193,18 @@ def set_top_ticker(text: str, tone: str = "info"):
         "tone": (tone or "info").strip().lower(),
     }
 
+# ✅ placeholder para re-render del ticker dentro del mismo run
+_TICKER_SLOT = None
+
 def render_top_ticker():
+    global _TICKER_SLOT
     data = st.session_state.get("top_ticker") or {}
     text = (data.get("text") or "").strip()
     tone = (data.get("tone") or "info").strip().lower()
+
+    # ✅ si no hay texto, no renderiza (no aparece “LexaCAE...” por default)
+    if not text:
+        return
 
     tone_border = {
         "info": "rgba(37,99,235,.22)",
@@ -217,201 +225,202 @@ def render_top_ticker():
         .replace(">", "&gt;")
     )
 
-    st.markdown(
-        f"""
-        <style>
-          /* ✅ ancho "de la página" (igual al block-container) */
-          :root {{
-            --lx-page-width: 1200px;       /* <- cambiá esto si tocás tu max-width */
-            --lx-page-pad-x: 0px;          /* opcional si querés sumar un poquito */
-            --lx-gutter-left: 72px;        /* para no tapar ⋮ / sidebar toggle */
-            --lx-topbar-pad-y: 14px;       /* ✅ más alto (antes 10px) */
-          }}
+    html = f"""
+    <style>
+      /* ✅ ancho "de la página" (igual al block-container) */
+      :root {{
+        --lx-page-width: 1200px;       /* <- cambiá esto si tocás tu max-width */
+        --lx-page-pad-x: 0px;          /* opcional si querés sumar un poquito */
+        --lx-gutter-left: 72px;        /* para no tapar ⋮ / sidebar toggle */
+        --lx-topbar-pad-y: 14px;       /* ✅ más alto */
+      }}
 
-          /* Reservar espacio arriba para que no tape el contenido */
-          section.main > div {{ padding-top: 4.75rem !important; }} /* ✅ un poco más (antes 4.25rem) */
+      /* Reservar espacio arriba para que no tape el contenido */
+      section.main > div {{ padding-top: 4.75rem !important; }}
 
-          /* ====== CONTENEDOR FIXED: centrado al ancho de la página ====== */
-          .lx-topbar {{
-            position: fixed;
-            top: 0;
-            left: 50%;
-            transform: translateX(-50%);
-            width: calc(var(--lx-page-width) + var(--lx-page-pad-x));
-            z-index: 999999;
+      .lx-topbar {{
+        position: fixed;
+        top: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        width: calc(var(--lx-page-width) + var(--lx-page-pad-x));
+        z-index: 999999;
 
-            pointer-events: none;
-            background: transparent !important;
-            box-shadow: none !important;
-            border: none !important;
+        pointer-events: none;
+        background: transparent !important;
+        box-shadow: none !important;
+        border: none !important;
 
-            opacity: 1;
-            transition: transform .22s ease, opacity .22s ease;
-            will-change: transform, opacity;
-          }}
+        opacity: 1;
+        transition: transform .22s ease, opacity .22s ease;
+        will-change: transform, opacity;
+      }}
 
-          /* ocultar al scrollear */
-          .lx-topbar.lx-hidden {{
-            transform: translateX(-50%) translateY(-110%);
-            opacity: 0;
-            pointer-events: none;
-          }}
+      .lx-topbar.lx-hidden {{
+        transform: translateX(-50%) translateY(-110%);
+        opacity: 0;
+        pointer-events: none;
+      }}
 
-          /* Panel real: ocupa el ancho del topbar, pero deja el gutter libre */
-          .lx-topbar::before {{
-            content: "";
-            position: absolute;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            left: 0;
+      .lx-topbar::before {{
+        content: "";
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        margin-left: var(--lx-gutter-left);
 
-            /* ✅ deja libre el gutter para clicks */
-            margin-left: var(--lx-gutter-left);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        background: {tone_bg};
+        border-bottom: 1px solid {tone_border};
+        box-shadow: 0 12px 28px rgba(15,23,42,.10);
+        border-radius: 0 0 14px 14px;
+      }}
 
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            background: {tone_bg};
-            border-bottom: 1px solid {tone_border};
-            box-shadow: 0 12px 28px rgba(15,23,42,.10);
-            border-radius: 0 0 14px 14px;
-          }}
+      .lx-topbar-inner {{
+        position: relative;
+        width: 100%;
+        margin: 0 auto;
+        padding: var(--lx-topbar-pad-y) 16px;
+        padding-left: calc(16px + var(--lx-gutter-left));
+        display: flex;
+        align-items: center;
+        gap: 12px;
 
-          /* Contenido centrado (igual de ancho que la página) */
-          .lx-topbar-inner {{
-            position: relative;
-            width: 100%;
-            margin: 0 auto;
-            padding: var(--lx-topbar-pad-y) 16px;   /* ✅ más alto */
-            padding-left: calc(16px + var(--lx-gutter-left));
-            display: flex;
-            align-items: center;
-            gap: 12px;
+        pointer-events: auto;
+      }}
 
-            pointer-events: auto;
-          }}
+      .lx-topbar-dot {{
+        width: 9px; height: 9px; border-radius: 999px;
+        background: rgba(37,99,235,.90);
+        box-shadow: 0 0 0 6px rgba(37,99,235,.12);
+        flex: 0 0 auto;
+      }}
 
-          .lx-topbar-dot {{
-            width: 9px; height: 9px; border-radius: 999px;
-            background: rgba(37,99,235,.90);
-            box-shadow: 0 0 0 6px rgba(37,99,235,.12);
-            flex: 0 0 auto;
-          }}
+      .lx-marquee {{
+        position: relative;
+        overflow: hidden;
+        white-space: nowrap;
+        flex: 1 1 auto;
+      }}
 
-          .lx-marquee {{
-            position: relative;
-            overflow: hidden;
-            white-space: nowrap;
-            flex: 1 1 auto;
-          }}
+      .lx-track {{
+        display: inline-flex;
+        gap: 24px;
+        align-items: center;
+        will-change: transform;
+        animation: lx-scroll 22s linear infinite;
+      }}
 
-          .lx-track {{
-            display: inline-flex;
-            gap: 24px;
-            align-items: center;
-            will-change: transform;
-            animation: lx-scroll 22s linear infinite;
-          }}
+      .lx-item {{
+        font-size: 13px;
+        font-weight: 750;
+        letter-spacing: .2px;
+        color: rgba(15,23,42,.86);
+      }}
+      .lx-item b {{
+        font-weight: 800;
+        color: rgba(15,23,42,.92);
+      }}
 
-          .lx-item {{
-            font-size: 13px;
-            font-weight: 650;
-            letter-spacing: .2px;
-            color: rgba(15,23,42,.86);
-          }}
-          .lx-item b {{
-            font-weight: 800;
-            color: rgba(15,23,42,.92);
-          }}
+      @keyframes lx-scroll {{
+        0%   {{ transform: translateX(0); }}
+        100% {{ transform: translateX(-50%); }}
+      }}
 
-          @keyframes lx-scroll {{
-            0%   {{ transform: translateX(0); }}
-            100% {{ transform: translateX(-50%); }}
-          }}
+      .lx-topbar:hover .lx-track {{ animation-play-state: paused; }}
 
-          .lx-topbar:hover .lx-track {{ animation-play-state: paused; }}
+      @media (max-width: 1280px) {{
+        :root {{ --lx-page-width: 100%; }}
+        .lx-topbar {{
+          width: 100%;
+          left: 0;
+          transform: none;
+        }}
+        .lx-topbar.lx-hidden {{
+          transform: translateY(-110%);
+        }}
+      }}
 
-          /* responsive */
-          @media (max-width: 1280px) {{
-            :root {{ --lx-page-width: 100%; }}
-            .lx-topbar {{
-              width: 100%;
-              left: 0;
-              transform: none;
-            }}
-            .lx-topbar.lx-hidden {{
-              transform: translateY(-110%);
-            }}
-          }}
+      @media (max-width: 720px) {{
+        :root {{
+          --lx-gutter-left: 64px;
+          --lx-topbar-pad-y: 13px;
+        }}
+        .lx-item {{ font-size: 12px; }}
+        section.main > div {{ padding-top: 4.55rem !important; }}
+      }}
+    </style>
 
-          @media (max-width: 720px) {{
-            :root {{
-              --lx-gutter-left: 64px;
-              --lx-topbar-pad-y: 13px;
-            }}
-            .lx-item {{ font-size: 12px; }}
-            section.main > div {{ padding-top: 4.55rem !important; }}
-          }}
-        </style>
-
-        <div id="lxTopbar" class="lx-topbar">
-          <div class="lx-topbar-inner">
-            <div class="lx-topbar-dot"></div>
-            <div class="lx-marquee" aria-label="LexaCAE ticker">
-              <div class="lx-track">
-                <div class="lx-item">{safe_text}</div>
-                <div class="lx-item">{safe_text}</div>
-              </div>
-            </div>
+    <div id="lxTopbar" class="lx-topbar">
+      <div class="lx-topbar-inner">
+        <div class="lx-topbar-dot"></div>
+        <div class="lx-marquee" aria-label="LexaCAE ticker">
+          <div class="lx-track">
+            <div class="lx-item">{safe_text}</div>
+            <div class="lx-item">{safe_text}</div>
           </div>
         </div>
+      </div>
+    </div>
 
-        <script>
-        (function() {{
-          const TOP_THRESHOLD = 8;
-          const BAR_ID = "lxTopbar";
+    <script>
+    (function() {{
+      const TOP_THRESHOLD = 8;
+      const BAR_ID = "lxTopbar";
 
-          function getScrollTop(doc) {{
-            try {{
-              return (doc.documentElement && doc.documentElement.scrollTop) || doc.body.scrollTop || 0;
-            }} catch(e) {{
-              return 0;
-            }}
-          }}
+      function getScrollTop(doc) {{
+        try {{
+          return (doc.documentElement && doc.documentElement.scrollTop) || doc.body.scrollTop || 0;
+        }} catch(e) {{
+          return 0;
+        }}
+      }}
 
-          function setHidden(hidden) {{
-            try {{
-              const bar = window.parent.document.getElementById(BAR_ID) || document.getElementById(BAR_ID);
-              if (!bar) return;
-              if (hidden) bar.classList.add("lx-hidden");
-              else bar.classList.remove("lx-hidden");
-            }} catch(e) {{}}
-          }}
+      function setHidden(hidden) {{
+        try {{
+          const bar = window.parent.document.getElementById(BAR_ID) || document.getElementById(BAR_ID);
+          if (!bar) return;
+          if (hidden) bar.classList.add("lx-hidden");
+          else bar.classList.remove("lx-hidden");
+        }} catch(e) {{}}
+      }}
 
-          function onScroll() {{
-            let st = 0;
-            try {{
-              st = getScrollTop(window.parent.document);
-            }} catch(e) {{
-              st = getScrollTop(document);
-            }}
-            setHidden(st > TOP_THRESHOLD);
-          }}
+      function onScroll() {{
+        let st = 0;
+        try {{
+          st = getScrollTop(window.parent.document);
+        }} catch(e) {{
+          st = getScrollTop(document);
+        }}
+        setHidden(st > TOP_THRESHOLD);
+      }}
 
-          try {{ window.parent.addEventListener("scroll", onScroll, {{ passive: true }}); }} catch(e) {{}}
-          try {{ window.addEventListener("scroll", onScroll, {{ passive: true }}); }} catch(e) {{}}
+      try {{ window.parent.addEventListener("scroll", onScroll, {{ passive: true }}); }} catch(e) {{}}
+      try {{ window.addEventListener("scroll", onScroll, {{ passive: true }}); }} catch(e) {{}}
 
-          try {{
-            const obs = new MutationObserver(() => onScroll());
-            obs.observe(window.parent.document.body, {{ childList: true, subtree: true }});
-          }} catch(e) {{}}
+      try {{
+        const obs = new MutationObserver(() => onScroll());
+        obs.observe(window.parent.document.body, {{ childList: true, subtree: true }});
+      }} catch(e) {{}}
 
-          setTimeout(onScroll, 50);
-        }})();
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+      setTimeout(onScroll, 50);
+    }})();
+    </script>
+    """
+
+    # ✅ render dentro del slot (para poder actualizar durante el mismo run)
+    if _TICKER_SLOT is None:
+        st.markdown(html, unsafe_allow_html=True)
+    else:
+        _TICKER_SLOT.markdown(html, unsafe_allow_html=True)
+
+def set_ticker_and_refresh(text: str, tone: str = "info"):
+    """Setea ticker y lo re-renderiza en el mismo run (sin depender de rerun)."""
+    set_top_ticker(text, tone=tone)
+    render_top_ticker()
 
 # ===================== BLOQUEAR ENTER EN PASSWORD =====================
 def block_enter_on_password_inputs():
@@ -513,19 +522,9 @@ st.set_page_config(
 
 inject_enterprise_theme_light()
 
-# ===================== TOP TICKER (LIVE) =====================
-TICKER_SLOT = st.empty()
-
-def refresh_top_ticker():
-    with TICKER_SLOT:
-        render_top_ticker()
-
-def set_ticker_and_refresh(text: str, tone: str = "info"):
-    set_top_ticker(text, tone)
-    refresh_top_ticker()
-
-# Render inicial del ticker
-refresh_top_ticker()
+# ✅ slot fijo para que el ticker pueda actualizarse dentro del mismo run
+_TICKER_SLOT = st.empty()
+render_top_ticker()  # si está vacío, no imprime nada
 
 # ===================== HERO / HEADER =====================
 col1, col2 = st.columns([1, 2], vertical_alignment="center")
@@ -1098,6 +1097,7 @@ with st.sidebar:
 
 # ===================== HOME (NO LOGUEADO) =====================
 if not st.session_state.auth["logged"]:
+    set_ticker_and_refresh("", "info")  # ✅ sin ticker si no está logueado
     lex_card_open()
     st.info("Iniciá sesión para comenzar.")
     st.subheader("Cómo funciona")
@@ -1117,11 +1117,7 @@ if not st.session_state.auth["logged"]:
 
 # ===================== PERFIL =====================
 def render_perfil():
-    # ✅ ticker default en páginas no-validación
-    set_ticker_and_refresh(
-        "🛡️ LexaCAE • Validación oficial AFIP (WSCDC) • Trazabilidad y auditoría • Soporte por WhatsApp",
-        "info"
-    )
+    set_ticker_and_refresh("", "info")  # ✅ no ticker en perfil
 
     st.subheader("Mi perfil")
     st.caption("Acá podés ver y actualizar tus datos. Los cambios se guardan en el sistema.")
@@ -1238,9 +1234,11 @@ def render_validacion():
         total_updated_at_raw = usage_total.get("updated_at", "") or ""
         total_updated_at = _fmt_yyyy_mm_from_iso(total_updated_at_raw)
 
-        FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", ""))
+        # ✅ plan_limit por env (default 30 si no está seteada)
+        FRONT_PLAN_LIMIT = _parse_int_or_none(os.getenv("PLAN_LIMIT", "30"))
         plan_used = total_files
         plan_limit = FRONT_PLAN_LIMIT
+
         if plan_limit is not None:
             plan_remaining = max(0, int(plan_limit) - int(plan_used))
             plan_blocked = plan_used >= plan_limit
@@ -1253,6 +1251,35 @@ def render_validacion():
         with colm3:
             st.metric("Mes", total_updated_at or "-")
 
+        # ✅ TICKER = SOLO estado de cuenta (en vivo)
+        if plan_limit and plan_limit > 0:
+            ratio = min(1.0, max(0.0, float(plan_used) / float(plan_limit)))
+            pct = int(ratio * 100)
+
+            # ✅ umbrales ajustables por env
+            # - a 20/30 (66%) con default WARN_AT=0.60 ya entra en precaución
+            WARN_AT = float(os.getenv("PLAN_WARN_AT", "0.60"))
+            DANGER_AT = float(os.getenv("PLAN_DANGER_AT", "0.90"))
+
+            if ratio >= 1.0 or ratio >= DANGER_AT:
+                tone = "danger" if ratio >= 1.0 else "warn"
+            else:
+                tone = "warn" if ratio >= WARN_AT else "info"
+
+            if ratio >= 1.0:
+                prefix = "🚫 Plan agotado"
+            elif ratio >= WARN_AT:
+                prefix = "⚠️ Plan en uso"
+            else:
+                prefix = "✅ Plan OK"
+
+            set_ticker_and_refresh(
+                f"{prefix} — {plan_used}/{plan_limit} usados • {plan_remaining} restantes ({pct}%)",
+                tone=tone
+            )
+        else:
+            set_ticker_and_refresh(f"📌 Consumo — {plan_used} PDF usados", tone="info")
+
         if plan_limit is not None:
             st.caption(f"Plan: **{plan_used} / {plan_limit}** PDF usados · Restantes: **{plan_remaining}**")
 
@@ -1260,27 +1287,10 @@ def render_validacion():
                 ratio = min(1.0, max(0.0, float(plan_used) / float(plan_limit)))
                 st.progress(ratio)
 
-                pct = int(ratio * 100)
-                if ratio >= 1.0:
-                    set_ticker_and_refresh(
-                        f"🚫 Plan agotado ({plan_used}/{plan_limit}) • Renovación por WhatsApp disponible • Evitá cortar operaciones",
-                        tone="danger",
-                    )
-                elif ratio >= 0.85:
-                    set_ticker_and_refresh(
-                        f"⚠️ Plan por agotarse ({plan_used}/{plan_limit} — {pct}%) • Recomendado renovar antes del límite",
-                        tone="warn",
-                    )
-                else:
-                    set_ticker_and_refresh(
-                        f"🛡️ LexaCAE • Validación AFIP (WSCDC) • Plan OK: {plan_used}/{plan_limit} ({pct}%) • Resultados exportables",
-                        tone="info",
-                    )
-
                 if ratio >= 1.0:
                     st.error("🚫 Plan agotado. Renovalo para seguir validando.")
-                elif ratio >= 0.85:
-                    st.warning("⚠️ Te estás quedando sin plan. Te conviene renovar antes de cortar operaciones.")
+                elif ratio >= float(os.getenv("PLAN_WARN_AT", "0.60")):
+                    st.warning("⚠️ Ojo: estás consumiendo una buena parte del plan. Recomendado renovar antes del límite.")
                 else:
                     st.caption(f"Consumo: **{plan_used}** / **{plan_limit}** ({int(ratio * 100)}%)")
 
@@ -1452,11 +1462,9 @@ def render_validacion():
                     st.error("Falló la validación con AFIP para uno de los lotes.")
                     st.caption(f"Detalle: {msg[:240]}")
 
+                    # ✅ si es plan_limit, forzamos ticker a danger + botón
                     if "límite de su plan" in msg.lower() or "plan_limit_reached" in msg.lower():
-                        set_ticker_and_refresh(
-                            "🚫 Plan agotado • No se puede validar más PDFs hasta renovar • Renovación por WhatsApp disponible",
-                            tone="danger",
-                        )
+                        set_ticker_and_refresh("🚫 Plan agotado — Renovación por WhatsApp disponible", tone="danger")
                         st.link_button("Renovar por WhatsApp", _wa_renew_url(), use_container_width=True)
                     break
 
