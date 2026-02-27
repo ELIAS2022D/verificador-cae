@@ -346,12 +346,17 @@ def render_top_ticker():
 
       @media (max-width: 720px) {{
         :root {{
-          --lx-gutter-left: 64px;
-          --lx-topbar-pad-y: 13px;
+        --lx-gutter-left: 64px;
+        --lx-topbar-pad-y: 13px;
         }}
         .lx-item {{ font-size: 12px; }}
-        section.main > div {{ padding-top: 4.55rem !important; }}
-      }}
+
+        /* ✅ ocultar ticker en mobile */
+        .lx-topbar {{ display: none !important; }}
+
+        /* ✅ como no hay ticker, no reservamos espacio arriba */
+        section.main > div {{ padding-top: 1.15rem !important; }}
+        }}
     </style>
 
     <div id="lxTopbar" class="lx-topbar">
